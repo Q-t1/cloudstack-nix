@@ -48,6 +48,12 @@ stdenvNoCC.mkDerivation {
     # the management server upgrades it to the current version itself.
     cp -r "$build/client/target/utilities/scripts/db" "$mgmt/setup"
 
+    # The simulator hypervisor plugin. The launcher leaves it off the
+    # classpath unless CLOUDSTACK_EXTRA_CLASSPATH adds it; its schema and seed
+    # data are in setup/ (create-schema-simulator.sql, *.simulator.sql).
+    install -Dm644 "$build/plugins/hypervisors/simulator/target/cloud-plugin-hypervisor-simulator-${version}.jar" \
+      -t "$mgmt/simulator"
+
     # System VM template metadata. The templates themselves are downloaded on
     # demand when a zone gets its secondary storage.
     install -Dm644 "$build/engine/schema/dist/systemvm-templates/metadata.ini" \

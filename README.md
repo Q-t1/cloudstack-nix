@@ -3,10 +3,10 @@
 The [Apache CloudStack](https://cloudstack.apache.org/) management server,
 built from source with Nix and run as a NixOS service.
 
-Currently packages **CloudStack 4.23.0.0**. The management server, its database
-setup and the web UI are covered by a NixOS VM test. Hypervisor hosts (KVM
-agent), the usage server and real secondary storage are not covered yet, see
-[Roadmap](#roadmap).
+Currently packages **CloudStack 4.23.0.0**. NixOS VM tests cover the management
+server, its database setup and the web UI, and deploy a zone with a VM on the
+simulator hypervisor. Real hypervisor hosts (KVM agent), the usage server and
+real secondary storage are not covered yet, see [Roadmap](#roadmap).
 
 ## Outputs
 
@@ -17,7 +17,8 @@ agent), the usage server and real secondary storage are not covered yet, see
 | `packages.x86_64-linux.cloudstack-build` | Maven reactor build: staging tree of the build artifacts |
 | `nixosModules.cloudstack-management` | `services.cloudstack.management` |
 | `overlays.default` | Adds `cloudstackPackages` (a scope) and `cloudstack-management` |
-| `checks.x86_64-linux.nixos-management` | NixOS VM test |
+| `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
+| `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor |
 
 ## Usage
 
@@ -65,9 +66,32 @@ server upgrades the base schema (CloudStack 4.0) to its own version.
 - The `cloud` user (CloudStack only creates the system VM SSH key pair when it
   runs as `cloud`), the sudo rules for the commands the server runs as root
   (NFS mounts, system VM template seeding), NFS client support, and CloudMonkey
-  (`cmk`).
+  (`cloudstack-cloudmonkey`).
 - Optional HTTPS on the embedded Jetty (`https.*`), and UI branding through
   `ui.settings`, which is merged into the UI's `config.json`.
+- Optionally, for development and testing, the simulator hypervisor
+  (`simulator.enable`): simulated hosts, storage and system VMs, enough to
+  deploy zones and VMs from the API or the UI. Hosts are added with URLs like
+  `http://sim/c0/h0`. The module creates the `simulator` database; once the
+  first start has upgraded the schema, `cloudstack-management-simulator.service`
+  loads upstream's simulator templates, so wait for it before adding a zone.
+  `tests/simulator.nix` deploys a whole zone.
+
+### Exploring a simulated zone
+
+To browse the zone that the simulator test deploys, run the test's interactive
+driver with the web UI forwarded to the host:
+
+```sh
+QEMU_NET_OPTS=hostfwd=tcp:127.0.0.1:8080-:8080 \
+  nix run .#checks.x86_64-linux.nixos-simulator.driverInteractive
+```
+
+At the Python prompt, `run_tests()` runs the test (a few minutes) and leaves the
+VM running. Then open <http://localhost:8080/client> and log in as `admin` /
+`password`, or call `machine.shell_interact()` for a root shell with
+`cloudstack-cloudmonkey`. The test destroys its VM at the end; new ones can use
+the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 
 ### Paths
 
@@ -91,6 +115,9 @@ server upgrades the base schema (CloudStack 4.0) to its own version.
   - `genisoimage` is also looked up in `PATH`; the ipmitool default is `ipmitool`.
   - The install paths of the system VM template metadata, the CKS configuration
     and the extensions become Java system properties, set by the launcher.
+  - The simulator hypervisor plugin is built, but not into the client jar: it
+    replaces the NFS secondary storage provider, so it only goes on the
+    classpath with `simulator.enable`.
 - Script interpreters are resolved from `PATH` (`#!/usr/bin/env bash`) rather
   than store paths, because some scripts are copied to XenServer/OVM3 hosts.
 - `scripts/vm/systemvm/id_rsa.cloud`, a publicly known placeholder key
@@ -114,7 +141,7 @@ To bump CloudStack:
    `nix build .#cloudstack-build.fetchedMavenDeps`, and copy the reported hash.
 3. Run `pkgs/cloudstack/update-ui-lockfile.sh`, set `npmDepsHash =
    lib.fakeHash;` in `ui.nix`, build `.#cloudstack-ui.npmDeps` and copy the hash.
-4. Run `nix flake check -L`, which also runs the VM test.
+4. Run `nix flake check -L`, which also runs the VM tests.
 
 The `substituteInPlace --replace-fail` patches fail the build if upstream moves
 the code they patch.
@@ -124,6 +151,7 @@ the code they patch.
 - KVM agent module (`services.cloudstack.agent`). This is the hard part: libvirt
   hooks, host networking, and an `agent.properties` that the agent rewrites.
 - Usage server. Its artifacts are already in `cloudstack-build`.
-- A VM test that deploys a zone, either with the simulator (`-Dsimulator`) or
-  with nested KVM and NFS secondary storage.
+- A VM test that deploys a zone with nested KVM and NFS secondary storage. The
+  simulator test covers the orchestration, but no real host, storage or system
+  VM.
 - CI with a binary cache, so nobody rebuilds the Maven reactor locally.

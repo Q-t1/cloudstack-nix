@@ -9,6 +9,10 @@
 #                        Default: /etc/cloudstack/management
 #   JAVA_OPTS            extra JVM options, word-split. They come after the
 #                        defaults below, so -D options set here win.
+#   CLOUDSTACK_EXTRA_CLASSPATH
+#                        classpath entries appended to the defaults, e.g.
+#                        @out@/share/cloudstack-management/simulator/*
+#                        for the simulator hypervisor.
 set -eu
 
 conf_dir="${CLOUDSTACK_CONF_DIR:-/etc/cloudstack/management}"
@@ -24,5 +28,5 @@ exec "@jre@/bin/java" \
   -Dcloudstack.cks.config.path="$share/cloudstack-management/cks" \
   -Dcloudstack.extensions.path=/var/lib/cloudstack/extensions \
   ${JAVA_OPTS:-} \
-  -cp "$conf_dir:$share/cloudstack-management/lib/*:$share/cloudstack-common:$share/cloudstack-management/setup:$share/cloudstack-management" \
+  -cp "$conf_dir:$share/cloudstack-management/lib/*:$share/cloudstack-common:$share/cloudstack-management/setup:$share/cloudstack-management${CLOUDSTACK_EXTRA_CLASSPATH:+:$CLOUDSTACK_EXTRA_CLASSPATH}" \
   org.apache.cloudstack.ServerDaemon "$@"

@@ -38,6 +38,7 @@
       checks = forAllSystems (pkgs: {
         inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) cloudstack-management;
         nixos-management = pkgs.testers.runNixOSTest (import ./tests/management.nix { inherit self; });
+        nixos-simulator = pkgs.testers.runNixOSTest (import ./tests/simulator.nix { inherit self; });
       });
 
       # For working on the upstream source tree.
