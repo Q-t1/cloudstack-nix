@@ -54,6 +54,13 @@ maven.buildMavenPackage {
       --replace-fail 'getFile("/usr/bin/genisoimage")' \
                      'getFile(Script.getExecutableAbsolutePath("genisoimage"))'
 
+    # Build the simulator hypervisor plugin, for testing, without adding it to
+    # the client jar as -Dsimulator does: it replaces the NFS image store
+    # provider, so it must stay off the classpath unless asked for.
+    substituteInPlace plugins/pom.xml \
+      --replace-fail '<module>hypervisors/xenserver</module>' \
+                     '<module>hypervisors/xenserver</module><module>hypervisors/simulator</module>'
+
     substituteInPlace plugins/outofbandmanagement-drivers/ipmitool/src/main/java/org/apache/cloudstack/outofbandmanagement/driver/ipmitool/IpmitoolOutOfBandManagementDriver.java \
       --replace-fail '"/usr/bin/ipmitool"' '"ipmitool"'
 
@@ -103,6 +110,7 @@ maven.buildMavenPackage {
       client/target/classes/META-INF/webapp \
       server/target/conf \
       utils/target/cloud-utils-${version}-bundled.jar \
+      plugins/hypervisors/simulator/target/cloud-plugin-hypervisor-simulator-${version}.jar \
       engine/schema/dist/systemvm-templates \
       systemvm/dist
 

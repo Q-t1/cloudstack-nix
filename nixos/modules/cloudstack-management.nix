@@ -35,6 +35,7 @@ let
   secretProperties = [
     "db.cloud.password"
     "db.usage.password"
+    "db.simulator.password"
     "db.cloud.encrypt.secret"
     "https.keystore.password"
   ];
@@ -123,6 +124,33 @@ let
 
   mysqlClient =
     if cfg.database.createLocally then config.services.mysql.package else pkgs.mariadb.client;
+
+  databases = [
+    "cloud"
+    "cloud_usage"
+  ]
+  ++ lib.optional cfg.simulator.enable "simulator";
+
+  # Shell code that sets `mysql` (the client), `password` (the database
+  # password) and defines `mysql_cloud`, a client logged in as the database
+  # user. Its option file goes into the unit's RuntimeDirectory.
+  mysqlClientSetup = ''
+    # MariaDB 11 deprecates the `mysql` name; MySQL only has that one.
+    mysql=$(command -v mariadb || command -v mysql)
+
+    password=$(< ${lib.escapeShellArg dbPasswordFile})
+    cnf_password=$(printf '%s' "$password" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    cat > "$RUNTIME_DIRECTORY/client.cnf" <<EOF
+    [client]
+    host=${cfg.database.host}
+    port=${toString cfg.database.port}
+    user=${cfg.database.user}
+    password="$cnf_password"
+    EOF
+    mysql_cloud() {
+      "$mysql" --defaults-extra-file="$RUNTIME_DIRECTORY/client.cnf" "$@"
+    }
+  '';
 
   settingsOption =
     file: extraDescription:
@@ -330,6 +358,19 @@ in
         scripts.
       '';
     };
+
+    simulator.enable = lib.mkEnableOption ''
+      the simulator hypervisor, which simulates hosts, storage and system VMs
+      so that zones can be deployed without hardware (hosts are added with
+      URLs such as `http://sim/c0/h0`). It also replaces the NFS secondary
+      storage provider, so it is for development and testing only.
+
+      It uses a `simulator` database, which must already exist when the
+      database is not created locally. Its template and hypervisor
+      capabilities are loaded by `cloudstack-management-simulator.service`
+      once the server has upgraded the schema; wait for that unit before
+      adding a zone
+    '';
   };
 
   config = lib.mkIf cfg.enable {
@@ -365,76 +406,94 @@ in
     ];
 
     services.cloudstack.management.settings = {
-      db = lib.mapAttrs (_: lib.mkDefault) {
-        "cluster.node.IP" = cfg.nodeAddress;
-        "cluster.servlet.port" = 9090;
-        "region.id" = 1;
+      db = lib.mapAttrs (_: lib.mkDefault) (
+        {
+          "cluster.node.IP" = cfg.nodeAddress;
+          "cluster.servlet.port" = 9090;
+          "region.id" = 1;
 
-        "db.cloud.username" = cfg.database.user;
-        "db.cloud.host" = cfg.database.host;
-        "db.cloud.port" = cfg.database.port;
-        "db.cloud.name" = "cloud";
-        "db.cloud.driver" = "jdbc:mysql";
-        "db.cloud.uri" = "";
-        "db.cloud.connectionPoolLib" = "hikaricp";
-        "db.cloud.maxActive" = 250;
-        "db.cloud.maxIdle" = 30;
-        "db.cloud.maxWait" = 600000;
-        "db.cloud.minIdleConnections" = 5;
-        "db.cloud.connectionTimeout" = 30000;
-        "db.cloud.keepAliveTime" = 600000;
-        "db.cloud.validationQuery" = "/* ping */ SELECT 1";
-        "db.cloud.testOnBorrow" = true;
-        "db.cloud.testWhileIdle" = true;
-        "db.cloud.timeBetweenEvictionRunsMillis" = 40000;
-        "db.cloud.minEvictableIdleTimeMillis" = 240000;
-        "db.cloud.poolPreparedStatements" = false;
-        "db.cloud.url.params" =
-          "prepStmtCacheSize=517&cachePrepStmts=true&sessionVariables=sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'&serverTimezone=UTC";
-        "db.cloud.useSSL" = false;
-        "db.cloud.keyStore" = "";
-        "db.cloud.keyStorePassword" = "";
-        "db.cloud.trustStore" = "";
-        "db.cloud.trustStorePassword" = "";
-        # Encryption must be on for the database secret to be used; the key
-        # file is read from the configuration directory.
-        "db.cloud.encryption.type" = "file";
-        "db.cloud.encryptor.version" = "V2";
-        "db.cloud.replicas" = "localhost,localhost";
-        "db.cloud.autoReconnect" = true;
-        "db.cloud.failOverReadOnly" = false;
-        "db.cloud.reconnectAtTxEnd" = true;
-        "db.cloud.autoReconnectForPools" = true;
-        "db.cloud.secondsBeforeRetrySource" = 3600;
-        "db.cloud.queriesBeforeRetrySource" = 5000;
-        "db.cloud.initialTimeout" = 3600;
+          "db.cloud.username" = cfg.database.user;
+          "db.cloud.host" = cfg.database.host;
+          "db.cloud.port" = cfg.database.port;
+          "db.cloud.name" = "cloud";
+          "db.cloud.driver" = "jdbc:mysql";
+          "db.cloud.uri" = "";
+          "db.cloud.connectionPoolLib" = "hikaricp";
+          "db.cloud.maxActive" = 250;
+          "db.cloud.maxIdle" = 30;
+          "db.cloud.maxWait" = 600000;
+          "db.cloud.minIdleConnections" = 5;
+          "db.cloud.connectionTimeout" = 30000;
+          "db.cloud.keepAliveTime" = 600000;
+          "db.cloud.validationQuery" = "/* ping */ SELECT 1";
+          "db.cloud.testOnBorrow" = true;
+          "db.cloud.testWhileIdle" = true;
+          "db.cloud.timeBetweenEvictionRunsMillis" = 40000;
+          "db.cloud.minEvictableIdleTimeMillis" = 240000;
+          "db.cloud.poolPreparedStatements" = false;
+          "db.cloud.url.params" =
+            "prepStmtCacheSize=517&cachePrepStmts=true&sessionVariables=sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'&serverTimezone=UTC";
+          "db.cloud.useSSL" = false;
+          "db.cloud.keyStore" = "";
+          "db.cloud.keyStorePassword" = "";
+          "db.cloud.trustStore" = "";
+          "db.cloud.trustStorePassword" = "";
+          # Encryption must be on for the database secret to be used; the key
+          # file is read from the configuration directory.
+          "db.cloud.encryption.type" = "file";
+          "db.cloud.encryptor.version" = "V2";
+          "db.cloud.replicas" = "localhost,localhost";
+          "db.cloud.autoReconnect" = true;
+          "db.cloud.failOverReadOnly" = false;
+          "db.cloud.reconnectAtTxEnd" = true;
+          "db.cloud.autoReconnectForPools" = true;
+          "db.cloud.secondsBeforeRetrySource" = 3600;
+          "db.cloud.queriesBeforeRetrySource" = 5000;
+          "db.cloud.initialTimeout" = 3600;
 
-        "db.usage.username" = cfg.database.user;
-        "db.usage.host" = cfg.database.host;
-        "db.usage.port" = cfg.database.port;
-        "db.usage.name" = "cloud_usage";
-        "db.usage.driver" = "jdbc:mysql";
-        "db.usage.uri" = "";
-        "db.usage.connectionPoolLib" = "hikaricp";
-        "db.usage.maxActive" = 100;
-        "db.usage.maxIdle" = 30;
-        "db.usage.maxWait" = 600000;
-        "db.usage.minIdleConnections" = 5;
-        "db.usage.connectionTimeout" = 30000;
-        "db.usage.keepAliveTime" = 600000;
-        "db.usage.url.params" = "serverTimezone=UTC";
-        "db.usage.replicas" = "localhost,localhost";
-        "db.usage.autoReconnect" = true;
-        "db.usage.failOverReadOnly" = false;
-        "db.usage.reconnectAtTxEnd" = true;
-        "db.usage.autoReconnectForPools" = true;
-        "db.usage.secondsBeforeRetrySource" = 3600;
-        "db.usage.queriesBeforeRetrySource" = 5000;
-        "db.usage.initialTimeout" = 3600;
+          "db.usage.username" = cfg.database.user;
+          "db.usage.host" = cfg.database.host;
+          "db.usage.port" = cfg.database.port;
+          "db.usage.name" = "cloud_usage";
+          "db.usage.driver" = "jdbc:mysql";
+          "db.usage.uri" = "";
+          "db.usage.connectionPoolLib" = "hikaricp";
+          "db.usage.maxActive" = 100;
+          "db.usage.maxIdle" = 30;
+          "db.usage.maxWait" = 600000;
+          "db.usage.minIdleConnections" = 5;
+          "db.usage.connectionTimeout" = 30000;
+          "db.usage.keepAliveTime" = 600000;
+          "db.usage.url.params" = "serverTimezone=UTC";
+          "db.usage.replicas" = "localhost,localhost";
+          "db.usage.autoReconnect" = true;
+          "db.usage.failOverReadOnly" = false;
+          "db.usage.reconnectAtTxEnd" = true;
+          "db.usage.autoReconnectForPools" = true;
+          "db.usage.secondsBeforeRetrySource" = 3600;
+          "db.usage.queriesBeforeRetrySource" = 5000;
+          "db.usage.initialTimeout" = 3600;
 
-        "db.ha.enabled" = false;
-        "db.ha.loadBalanceStrategy" = "com.cloud.utils.db.StaticStrategy";
-      };
+          "db.ha.enabled" = false;
+          "db.ha.loadBalanceStrategy" = "com.cloud.utils.db.StaticStrategy";
+        }
+        // lib.optionalAttrs cfg.simulator.enable {
+          "db.simulator.username" = cfg.database.user;
+          "db.simulator.host" = cfg.database.host;
+          "db.simulator.port" = cfg.database.port;
+          "db.simulator.name" = "simulator";
+          "db.simulator.driver" = "jdbc:mysql";
+          "db.simulator.uri" = "";
+          "db.simulator.connectionPoolLib" = "hikaricp";
+          "db.simulator.maxActive" = 250;
+          "db.simulator.maxIdle" = 30;
+          "db.simulator.maxWait" = 600000;
+          "db.simulator.minIdleConnections" = 5;
+          "db.simulator.connectionTimeout" = 30000;
+          "db.simulator.keepAliveTime" = 600000;
+          "db.simulator.autoReconnect" = true;
+        }
+      );
 
       server = lib.mapAttrs (_: lib.mkDefault) (
         {
@@ -526,9 +585,6 @@ in
       script = ''
         set -euo pipefail
 
-        # MariaDB 11 deprecates the `mysql` name; MySQL only has that one.
-        mysql=$(command -v mariadb || command -v mysql)
-
         generate() {
           if [ ! -s "${secretsDir}/$1" ]; then
             echo "Generating ${secretsDir}/$1"
@@ -539,46 +595,47 @@ in
         ${lib.optionalString (cfg.secretKeyFile == null) "generate secret-key"}
         ${lib.optionalString (cfg.databaseSecretKeyFile == null) "generate database-secret-key"}
 
-        password=$(< ${lib.escapeShellArg dbPasswordFile})
+        ${mysqlClientSetup}
       ''
       + lib.optionalString cfg.database.createLocally ''
         # Replaces upstream's create-database*.sql, which drop and recreate.
         sql_password=$(printf '%s' "$password" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")
         {
-          echo "CREATE DATABASE IF NOT EXISTS cloud;"
-          echo "CREATE DATABASE IF NOT EXISTS cloud_usage;"
+          for db in ${toString databases}; do
+            echo "CREATE DATABASE IF NOT EXISTS $db;"
+          done
           for host in localhost 127.0.0.1 ::1; do
             user="'${cfg.database.user}'@'$host'"
             echo "CREATE USER IF NOT EXISTS $user IDENTIFIED BY '$sql_password';"
             echo "ALTER USER $user IDENTIFIED BY '$sql_password';"
-            echo "GRANT ALL ON cloud.* TO $user;"
-            echo "GRANT ALL ON cloud_usage.* TO $user;"
+            for db in ${toString databases}; do
+              echo "GRANT ALL ON $db.* TO $user;"
+            done
             echo "GRANT PROCESS ON *.* TO $user;"
           done
         } | "$mysql" --user=root
       ''
       + ''
-        cnf_password=$(printf '%s' "$password" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
-        cat > "$RUNTIME_DIRECTORY/client.cnf" <<EOF
-        [client]
-        host=${cfg.database.host}
-        port=${toString cfg.database.port}
-        user=${cfg.database.user}
-        password="$cnf_password"
-        EOF
-        mysql_cloud() {
-          "$mysql" --defaults-extra-file="$RUNTIME_DIRECTORY/client.cnf" "$@"
+        count_tables() {
+          mysql_cloud --batch --skip-column-names \
+            -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '$1'"
         }
 
         # Load the base schema (CloudStack 4.0) into an empty database; the
         # management server upgrades it to its own version when it starts.
-        tables=$(mysql_cloud --batch --skip-column-names \
-          -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'cloud'")
+        tables=$(count_tables cloud)
         if [ "$tables" -eq 0 ]; then
           echo "Loading the initial CloudStack database schema"
           for script in create-schema create-schema-premium server-setup templates; do
             mysql_cloud < ${share}/cloudstack-management/setup/$script.sql
           done
+        fi
+      ''
+      + lib.optionalString cfg.simulator.enable ''
+        tables=$(count_tables simulator)
+        if [ "$tables" -eq 0 ]; then
+          echo "Loading the simulator database schema"
+          mysql_cloud < ${share}/cloudstack-management/setup/create-schema-simulator.sql
         fi
       '';
     };
@@ -599,6 +656,9 @@ in
       environment = {
         CLOUDSTACK_CONF_DIR = confDir;
         JAVA_OPTS = lib.concatStringsSep " " cfg.javaOptions;
+      }
+      // lib.optionalAttrs cfg.simulator.enable {
+        CLOUDSTACK_EXTRA_CLASSPATH = "${share}/cloudstack-management/simulator/*";
       };
 
       # Assembles the configuration directory, which goes first on the
@@ -626,6 +686,7 @@ in
           property db.cloud.password db-password
           property db.usage.password db-password
           property db.cloud.encrypt.secret database-secret-key
+          ${lib.optionalString cfg.simulator.enable "property db.simulator.password db-password"}
         } > ${confDir}/db.properties
         {
           cat ${propertiesFormat.generate "server.properties" cfg.settings.server}
@@ -681,6 +742,57 @@ in
         ProtectHome = true;
         ProtectControlGroups = true;
       };
+    };
+
+    # Upstream's simulator seed data (templates.simulator.sql and
+    # hypervisor_capabilities.simulator.sql) needs the current schema, which
+    # the management server creates from the base schema on its first start.
+    systemd.services.cloudstack-management-simulator = lib.mkIf cfg.simulator.enable {
+      description = "Apache CloudStack simulator templates";
+      wantedBy = [ "cloudstack-management.service" ];
+      after = [ "cloudstack-management.service" ];
+      path = [
+        mysqlClient
+        pkgs.coreutils
+        pkgs.gnused
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        # The database upgrade on the first start takes minutes.
+        TimeoutStartSec = "1h";
+        RuntimeDirectory = "cloudstack-management-simulator";
+        RuntimeDirectoryMode = "0700";
+        UMask = "0077";
+      };
+      script = ''
+        set -euo pipefail
+
+        ${mysqlClientSetup}
+        query() {
+          mysql_cloud --batch --skip-column-names -e "$1"
+        }
+
+        # The last upgrade step marks the package version as complete.
+        echo "Waiting for the database upgrade to ${cfg.package.version}"
+        while true; do
+          upgraded=$(query "SELECT COUNT(*) FROM cloud.version WHERE version = '${cfg.package.version}' AND step = 'Complete'")
+          [ "$upgraded" -gt 0 ] && break
+          sleep 5
+        done
+
+        # The scripts insert fixed ids, so they only run once.
+        loaded=$(query "SELECT COUNT(*) FROM cloud.vm_template WHERE unique_name = 'simulator-domR'")
+        if [ "$loaded" -eq 0 ]; then
+          echo "Loading the simulator templates and hypervisor capabilities"
+          {
+            echo "START TRANSACTION;"
+            cat ${share}/cloudstack-management/setup/templates.simulator.sql
+            cat ${share}/cloudstack-management/setup/hypervisor_capabilities.simulator.sql
+            echo "COMMIT;"
+          } | mysql_cloud
+        fi
+      '';
     };
   };
 }
