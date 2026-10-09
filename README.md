@@ -7,8 +7,9 @@ Currently packages **CloudStack 4.23.0.0**, with the usage server. NixOS VM test
 cover the management server, its database setup and the web UI; deploy a zone
 with a VM on the simulator hypervisor, which the usage server bills; and deploy a
 zone on a KVM host with NFS storage, up to a guest VM in an isolated network,
-reached through its virtual router and live-migrated to a second host. See
-[Roadmap](#roadmap) for what is not covered yet.
+reached through its virtual router, its console opened through the console
+proxy over TLS, and live-migrated to a second host. See [Roadmap](#roadmap) for
+what is not covered yet.
 
 ## Outputs
 
@@ -28,7 +29,7 @@ reached through its virtual router and live-migrated to a second host. See
 | `checks.x86_64-linux.upstream-files` | Fails when a CloudStack bump changes upstream files that the flake follows by hand, see [Following upstream](#following-upstream) |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor, and the usage server's records for the VM |
-| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and live-migrated (needs nested virtualisation) |
+| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and its console over TLS, and live-migrated (needs nested virtualisation) |
 
 ## Usage
 
@@ -187,7 +188,8 @@ When the host is added, the management server logs in over SSH and
 
 1. has the host generate a key pair and a certificate request (`keystore-setup`),
    signs it with its CA and installs the certificate (`keystore-cert-import`),
-   all in `/etc/cloudstack/agent`, then has libvirtd listen with TLS;
+   all in `/etc/cloudstack/agent`, then has libvirtd listen with TLS and QEMU
+   serve VNC over TLS;
 2. runs `cloudstack-setup-agent`, which records the zone, pod, cluster, guid,
    management servers and network devices in `agent.properties` and starts the
    agent. Upstream's version also rewrites the host's network, libvirt,
@@ -204,10 +206,12 @@ of upstream's smoke tests), then deploys a VM in an isolated network. The VM
 gets its address and its password from the network's virtual router. The NFS
 server also plays the public network's gateway: it logs into the VM through
 port forwarding on the network's public address, and once an egress rule allows
-it, the VM reaches it through source NAT. Then a second KVM host joins the
-cluster, the VM is live-migrated to it and stays reachable, and the test
-destroys it. The KVM hosts are themselves VMs, so the test needs nested
-virtualisation.
+it, the VM reaches it through source NAT. It also opens the VM's console
+through the console proxy, as the web UI's noVNC client does, and checks that
+the console proxy reached the VM's VNC server over TLS. Then a second KVM host
+joins the cluster, the VM is live-migrated to it and stays reachable, its
+console too, and the test destroys it. The KVM hosts are themselves VMs, so the
+test needs nested virtualisation.
 
 The secondary storage VM refuses to download templates from private addresses
 unless they are in the global setting `secstorage.allowed.internal.sites`, which
@@ -250,10 +254,17 @@ the management server only reads when it starts.
   than `/etc/pki`, where `keystore-cert-import` links them, so the module
   links them there too. `openFirewall` opens 16514 and QEMU's migration ports
   (49152-49215).
+- VNC over TLS, for the console proxy, as upstream sets it up on secured hosts:
+  once the host has its certificate, `qemu.conf` gets `vnc_tls`, with a client
+  certificate required (`vnc_tls_x509_verify`) and the host's certificate in
+  `/var/lib/pki/libvirt-vnc`. The console proxy presents its own, from the
+  CloudStack CA. `qemu.conf` is rewritten at each start of libvirtd, so the
+  restart by `cloudstack-setup-agent -s` applies it to the VMs started
+  afterwards; until then VNC is plain. `openFirewall` opens the VNC ports
+  (5900-6100).
 
-Not set up yet: VNC over TLS for the console proxy (upstream enables it on
-secured hosts), and UEFI guests (the agent detects UEFI support by asking
-`dpkg` or `rpm` whether an `ovmf` package is installed, so it reports none).
+Not set up yet: UEFI guests (the agent detects UEFI support by asking `dpkg` or
+`rpm` whether an `ovmf` package is installed, so it reports none).
 
 ### Paths
 
@@ -262,7 +273,7 @@ secured hosts), and UEFI guests (the agent detects UEFI support by asking
 | `/var/lib/cloudstack/agent` | `agent.properties`, the agent's keystore and certificates; `/etc/cloudstack/agent` links here |
 | `/var/log/cloudstack/agent` | `agent.log` |
 | `/usr/share/cloudstack-common` | Scripts and system VM patch files, at the path the management server uses |
-| `/var/lib/pki` | libvirt's CA, certificates and keys: links to the host's certificate in `/var/lib/cloudstack/agent` |
+| `/var/lib/pki` | libvirt's CA, certificates and keys, and QEMU's for VNC (`libvirt-vnc`): links to the host's certificate in `/var/lib/cloudstack/agent` |
 
 ## Following upstream
 
@@ -304,9 +315,10 @@ On purpose, because NixOS manages the system declaratively:
   than encrypted with the key (`ENC(...)`).
 - `cloudstack-setup-agent` is a NixOS replacement, see [KVM hosts](#kvm-hosts):
   network, libvirt and firewall settings come from the NixOS configuration.
-  With `-s` it starts libvirtd's TLS socket rather than rewriting
-  `libvirtd.conf`. `cloudstack-agent-upgrade`, which renames bridges after an
-  upgrade from CloudStack 4.0, is not shipped.
+  With `-s` it starts libvirtd's TLS socket and restarts libvirtd, whose
+  `qemu.conf` then gets the VNC TLS settings, rather than rewriting
+  `libvirtd.conf` and `qemu.conf`. `cloudstack-agent-upgrade`, which renames
+  bridges after an upgrade from CloudStack 4.0, is not shipped.
 - systemd units: the agent is skipped until the host is added, rather than
   restarted every 10 s; the usage server runs as `cloud` in a sandbox rather
   than as root, and waits for the management server to set up the database.

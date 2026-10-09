@@ -22,6 +22,14 @@ let
   # not /etc as keystore-cert-import expects.
   pkiDir = "/var/lib/pki";
 
+  # The qemu.conf entries of upstream's `cloudstack-setup-agent -s`, with the
+  # certificate directory in pkiDir.
+  vncTlsConfig = pkgs.writeText "qemu-vnc-tls.conf" ''
+    vnc_tls = 1
+    vnc_tls_x509_verify = 1
+    vnc_tls_x509_cert_dir = "${pkiDir}/libvirt-vnc"
+  '';
+
   share = "${cfg.package}/share";
 
   # Tools the agent and its scripts call.
@@ -303,6 +311,18 @@ in
       unitConfig.ConditionPathExists = "${stateDir}/cloud.crt";
     };
 
+    # VNC over TLS, for the console proxy: once the host has its certificate,
+    # QEMU's VNC servers require TLS and a client certificate from the
+    # CloudStack CA, which the console proxy presents. libvirtd-config writes
+    # qemu.conf at each start of libvirtd, so the restart by
+    # `cloudstack-setup-agent -s` turns it on for the VMs started afterwards.
+    # Until then, VNC stays plain, so that VMs can start.
+    systemd.services.libvirtd-config.script = lib.mkAfter ''
+      if [ -e ${stateDir}/cloud.crt ]; then
+        cat ${vncTlsConfig} >> /var/lib/libvirt/qemu.conf
+      fi
+    '';
+
     # cloudstack-setup-agent, which the management server runs over SSH, and
     # upstream's helpers.
     environment.systemPackages = [ cfg.package ];
@@ -328,6 +348,12 @@ in
       "L+ ${pkiDir}/libvirt/clientcert.pem - - - - ${stateDir}/cloud.crt"
       "L+ ${pkiDir}/libvirt/private/serverkey.pem - - - - ${stateDir}/cloud.key"
       "L+ ${pkiDir}/libvirt/private/clientkey.pem - - - - ${stateDir}/cloud.key"
+      # The same, for VNC over TLS. libvirtd refuses to start if the
+      # directory is missing once qemu.conf names it.
+      "d ${pkiDir}/libvirt-vnc 0700 root root - -"
+      "L+ ${pkiDir}/libvirt-vnc/ca-cert.pem - - - - ${stateDir}/cloud.ca.crt"
+      "L+ ${pkiDir}/libvirt-vnc/server-cert.pem - - - - ${stateDir}/cloud.crt"
+      "L+ ${pkiDir}/libvirt-vnc/server-key.pem - - - - ${stateDir}/cloud.key"
     ];
 
     systemd.services.cloudstack-agent = {

@@ -2,9 +2,9 @@
 # up over SSH (certificates, then cloudstack-setup-agent) and the agent
 # connects back; with NFS primary and secondary storage, the zone then starts
 # its system VMs on the host, and a guest VM in an isolated network, which is
-# reached through its virtual router, then live-migrated to a second host. The
-# KVM hosts are themselves VMs, so this needs nested virtualisation on the
-# machine running the test.
+# reached through its virtual router and its console through the console proxy
+# over TLS, then live-migrated to a second host. The KVM hosts are themselves
+# VMs, so this needs nested virtualisation on the machine running the test.
 { self }:
 let
   kvmHost =
@@ -108,7 +108,50 @@ in
             prefixLength = 24;
           }
         ];
-        environment.systemPackages = [ pkgs.sshpass ];
+        environment.systemPackages = [
+          pkgs.sshpass
+          # Opens a VM's console through the console proxy, at the websocket
+          # URL of createConsoleEndpoint, as its noVNC client does, and prints
+          # the desktop name. The console proxy goes through the VNC server's
+          # security types itself, and appends "(TLS backend)" to the name
+          # when it reached the server over TLS.
+          (pkgs.writers.writePython3Bin "vnc-console"
+            {
+              libraries = [ pkgs.python3Packages.websockets ];
+            }
+            ''
+              import struct
+              import sys
+
+              from websockets.sync.client import connect
+
+              with connect(sys.argv[1], subprotocols=["binary"]) as ws:
+                  pending = bytearray()
+
+                  def read(size):
+                      while len(pending) < size:
+                          pending.extend(ws.recv(timeout=60))
+                      data = bytes(pending[:size])
+                      del pending[:size]
+                      return data
+
+                  # The console proxy passes the version and the security
+                  # type chosen here on to the VNC server.
+                  ws.send(read(12))
+                  types = read(read(1)[0])
+                  ws.send(types[:1])
+                  (result,) = struct.unpack(">I", read(4))
+                  if result != 0:
+                      sys.exit(f"security result {result}")
+                  # ClientInit (shared), then ServerInit: size and pixel
+                  # format, then the name.
+                  ws.send(b"\x01")
+                  read(20)
+                  (length,) = struct.unpack(">I", read(4))
+                  print(read(length).decode())
+            ''
+          )
+        ];
 
         services.nfs.server = {
           enable = true;
@@ -202,6 +245,15 @@ in
               timeout=timeout,
           )
 
+      # Opens the VM's console from the public network, as a browser would:
+      # its noVNC client connects to the console proxy, which connects to the
+      # VM's VNC server on its host.
+      def assert_console_over_tls(vm):
+          websocket = cmk("create", "consoleendpoint", virtualmachineid=vm["id"])["consoleendpoint"]["websocket"]
+          url = f"ws://{websocket['host']}:{websocket['port']}/{websocket['path']}?token={websocket['token']}"
+          name = nfs.succeed(f"vnc-console {shlex.quote(url)}").strip()
+          assert name.endswith(" (TLS backend)"), f"console {name!r} is not over TLS"
+
       # Unauthenticated calls get a 401 once the API is up.
       def wait_for_api():
           management.wait_until_succeeds(
@@ -220,8 +272,10 @@ in
           # Skipped by its condition, not restarted over and over.
           kvm.succeed("systemctl show -P ActiveState cloudstack-agent | grep -qx inactive")
           kvm.succeed("systemctl show -P NRestarts cloudstack-agent | grep -qx 0")
-          # Without the host's certificate, libvirtd does not listen with TLS.
+          # Without the host's certificate, libvirtd does not listen with TLS,
+          # and VNC is plain.
           kvm.succeed("systemctl show -P ActiveState libvirtd-tls.socket | grep -qx inactive")
+          kvm.fail("grep -q vnc_tls /etc/libvirt/qemu.conf")
 
       with subtest("the management server comes up"), logs_on_failure():
           management.wait_for_unit("cloudstack-management.service")
@@ -291,6 +345,9 @@ in
           # libvirtd listens with TLS, with the host's certificate, which the
           # client side presents too: the agent's check for a secured host.
           kvm.succeed("virsh -c qemu+tls://${kvmIP}/system uri")
+          # QEMU's VNC servers require TLS, with the same certificate.
+          kvm.succeed("grep -qx 'vnc_tls = 1' /etc/libvirt/qemu.conf")
+          kvm.succeed("cd /var/lib/pki/libvirt-vnc && test -s ca-cert.pem -a -s server-cert.pem -a -s server-key.pem")
           host = cmk("list", "hosts", type="Routing", zoneid=zone["id"])["host"][0]
           assert host["hypervisor"] == "KVM", f"unexpected hypervisor {host['hypervisor']}"
           assert host["ipaddress"] == "${kvmIP}", f"unexpected host address {host['ipaddress']}"
@@ -381,6 +438,18 @@ in
           vlan = broadcast_uri.removeprefix("vlan://")
           kvm.succeed(f"test -d /sys/class/net/breth1-{vlan}/brif/eth1.{vlan}")
 
+      with subtest("the VM's console opens through the console proxy, over TLS"), logs_on_failure():
+          # The console proxy checks console sessions with the management
+          # server through its agent.
+          wait_for(
+              '.count == 1 and .host[0].state == "Up"',
+              "list", "hosts", type="ConsoleProxy", zoneid=zone["id"],
+              timeout=timedelta(minutes=15),
+          )
+          # Its VNC server requires TLS, with a client certificate: the
+          # console proxy's, from the CloudStack CA.
+          assert_console_over_tls(vm)
+
       with subtest("the VM gets its address from the virtual router"), logs_on_failure():
           nic = vm["nic"][0]
           router_ssh = system_vm_ssh(router["linklocalip"])
@@ -445,6 +514,8 @@ in
           # Still reachable, through its router on the first host, and still
           # running the same boot.
           assert nfs.succeed(f"{guest_ssh} cat /proc/sys/kernel/random/boot_id") == boot_id, "the VM restarted"
+          # Its console moved along, still over TLS.
+          assert_console_over_tls(vm)
 
       with subtest("the VM is destroyed and removed from the KVM host"), logs_on_failure():
           cmk("destroy", "virtualmachine", id=vm["id"], expunge="true")
