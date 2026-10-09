@@ -122,6 +122,20 @@ let
     ])
     ++ cfg.extraPackages;
 
+  # The package's metadata.ini, with the given templates next to it.
+  systemVmTemplatesDir = pkgs.linkFarm "cloudstack-systemvm-templates" (
+    [
+      {
+        name = "metadata.ini";
+        path = "${share}/cloudstack-management/templates/systemvm/metadata.ini";
+      }
+    ]
+    ++ map (template: {
+      inherit (template) name;
+      path = template;
+    }) cfg.systemVmTemplates
+  );
+
   mysqlClient =
     if cfg.database.createLocally then config.services.mysql.package else pkgs.mariadb.client;
 
@@ -356,6 +370,19 @@ in
       description = ''
         Extra packages in the management server's PATH, e.g. for extension
         scripts.
+      '';
+    };
+
+    systemVmTemplates = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      example = lib.literalExpression "[ cloudstackPackages.systemvmTemplates.kvm-x86_64 ]";
+      description = ''
+        System VM templates that the server copies to new secondary storage,
+        named as in its {file}`metadata.ini`, e.g. from
+        `cloudstackPackages.systemvmTemplates`. The server downloads the ones
+        it lacks for the zone's hypervisors from download.cloudstack.org; this
+        is for servers without that access, or to download them only once.
       '';
     };
 
@@ -655,7 +682,13 @@ in
 
       environment = {
         CLOUDSTACK_CONF_DIR = confDir;
-        JAVA_OPTS = lib.concatStringsSep " " cfg.javaOptions;
+        JAVA_OPTS = lib.concatStringsSep " " (
+          cfg.javaOptions
+          # Overrides the launcher's default.
+          ++ lib.optional (
+            cfg.systemVmTemplates != [ ]
+          ) "-Dcloudstack.systemvm.templates.path=${systemVmTemplatesDir}/"
+        );
       }
       // lib.optionalAttrs cfg.simulator.enable {
         CLOUDSTACK_EXTRA_CLASSPATH = "${share}/cloudstack-management/simulator/*";

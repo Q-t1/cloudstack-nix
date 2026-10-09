@@ -5,9 +5,9 @@ KVM agent, built from source with Nix and run as NixOS services.
 
 Currently packages **CloudStack 4.23.0.0**. NixOS VM tests cover the management
 server, its database setup and the web UI, deploy a zone with a VM on the
-simulator hypervisor, and add a KVM host to a zone. System VMs and guest VMs on
-KVM, the usage server and real secondary storage are not covered yet, see
-[Roadmap](#roadmap).
+simulator hypervisor, and deploy a zone on a KVM host with NFS storage, up to its
+system VMs. Guest VMs on KVM, live migration and the usage server are not
+covered yet, see [Roadmap](#roadmap).
 
 ## Outputs
 
@@ -18,13 +18,14 @@ KVM, the usage server and real secondary storage are not covered yet, see
 | `packages.x86_64-linux.cloudstack-common` | Scripts and system VM patch files shared by both |
 | `packages.x86_64-linux.cloudstack-ui` | Web UI (Vue), built with `buildNpmPackage` |
 | `packages.x86_64-linux.cloudstack-build` | Maven reactor build: staging tree of the build artifacts |
+| `packages.x86_64-linux.cloudstack-systemvm-template-kvm` | The KVM system VM template (518 MB download), for `systemVmTemplates` |
 | `nixosModules.cloudstack-management` | `services.cloudstack.management` |
 | `nixosModules.cloudstack-agent` | `services.cloudstack.agent`, see [KVM hosts](#kvm-hosts) |
 | `nixosModules.default` | Both modules |
 | `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management` and `cloudstack-agent` |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor |
-| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a KVM host added to a zone (needs nested virtualisation) |
+| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on a KVM host with NFS storage, up to its system VMs (needs nested virtualisation) |
 
 ## Usage
 
@@ -75,6 +76,10 @@ server upgrades the base schema (CloudStack 4.0) to its own version.
   (`cloudstack-cloudmonkey`).
 - Optional HTTPS on the embedded Jetty (`https.*`), and UI branding through
   `ui.settings`, which is merged into the UI's `config.json`.
+- System VM templates from the Nix store (`systemVmTemplates`, e.g.
+  `cloudstackPackages.systemvmTemplates.kvm-x86_64`), which the server copies to
+  new secondary storage. Otherwise it downloads them from
+  download.cloudstack.org when secondary storage is added.
 - Optionally, for development and testing, the simulator hypervisor
   (`simulator.enable`): simulated hosts, storage and system VMs, enough to
   deploy zones and VMs from the API or the UI. Hosts are added with URLs like
@@ -142,8 +147,8 @@ Then add the host to a KVM cluster, from the UI or with `addHost`: URL
 `http://<host address>`, user `root` (or a user with passwordless sudo) and its
 password. The management server tries its own key first, so with the key above
 any password will do. Before that, set the global setting `host` to the address
-that agents should connect to: it defaults to the address of the management
-server's default route, which may be on the wrong network.
+that agents and system VMs connect to: it defaults to the address of the
+management server's default route, which may be on the wrong network.
 
 When the host is added, the management server logs in over SSH and
 
@@ -157,6 +162,12 @@ When the host is added, the management server logs in over SSH and
    configuration's job.
 
 The agent then connects to the management server on port 8250.
+
+`tests/kvm.nix` deploys such a zone: a management server, a KVM host and an NFS
+server for primary and secondary storage, with the system VM template from
+`systemVmTemplates`. It waits for the secondary storage VM and the console proxy
+to run on the host. The KVM host is itself a VM, so the test needs nested
+virtualisation.
 
 ### What the module sets up
 
@@ -178,7 +189,8 @@ The agent then connects to the management server on port 8250.
   ones NixOS allows by default. `/etc/libvirt/libvirtd.conf` is only a marker:
   the keystore scripts check that it exists, and otherwise wait forever for a
   system VM.
-- `br_netfilter` for security groups, NFS client support, and
+- `br_netfilter` for security groups, NFS client support (libvirtd mounts NFS
+  storage pools itself, so `mount` is in its `PATH`), and
   `/var/lib/libvirt/images` for host-local primary storage.
 
 Not set up yet: live migration (libvirtd does not listen on the network) and
@@ -229,7 +241,9 @@ To bump CloudStack:
 
 1. In `pkgs/cloudstack/source.nix`, update `version`, the source `hash`, and the
    system VM template version and checksum file (see
-   `project.systemvm.template.version` in upstream's `pom.xml`).
+   `project.systemvm.template.version` in upstream's `pom.xml`). If the
+   template version changed, update `systemvmTemplates` too: the URLs, and the
+   checksums from that file.
 2. Set `mvnHash = lib.fakeHash;` in `build.nix`, run
    `nix build .#cloudstack-build.fetchedMavenDeps`, and copy the reported hash.
 3. Run `pkgs/cloudstack/update-ui-lockfile.sh`, set `npmDepsHash =
@@ -241,10 +255,9 @@ the code they patch.
 
 ## Roadmap
 
-- System VMs and a guest VM on KVM: extend `tests/kvm.nix` with NFS primary and
-  secondary storage and the KVM system VM template (a download of several
-  hundred MB, so probably a separate check). The simulator test covers the
-  orchestration, but no real storage or system VM.
+- A guest VM on KVM in `tests/kvm.nix`: a guest network (virtual router) and a
+  VM from a small template, served over HTTP inside the test since the
+  secondary storage VM downloads templates from a URL.
 - KVM live migration: libvirtd listening with TLS, using the certificates the
   management server installs in `/etc/cloudstack/agent`.
 - With the next Maven rebuild, Java changes for the agent:

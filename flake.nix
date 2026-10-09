@@ -30,6 +30,7 @@
             cloudstack-management
             cloudstack-agent
             ;
+          cloudstack-systemvm-template-kvm = cloudstack.systemvmTemplates.kvm-x86_64;
           default = cloudstack.cloudstack-management;
         }
       );
