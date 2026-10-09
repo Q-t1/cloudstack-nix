@@ -1,6 +1,7 @@
 # Deploys an advanced zone on the simulator hypervisor, which simulates the
-# hosts, storage and system VMs, then a VM in an isolated network. The zone
-# follows upstream's Marvin configuration setup/dev/advanced.cfg.
+# hosts, storage and system VMs, then a VM in an isolated network, which the
+# usage server bills. The zone follows upstream's Marvin configuration
+# setup/dev/advanced.cfg.
 { self }:
 {
   name = "cloudstack-simulator";
@@ -19,6 +20,7 @@
       services.cloudstack.management = {
         enable = true;
         simulator.enable = true;
+        usage.enable = true;
         # For the web UI through a forwarded port in the interactive driver.
         openFirewall = true;
       };
@@ -43,6 +45,8 @@
             yield
         except Exception:
             print(machine.execute("tail -n 300 /var/log/cloudstack/management/management-server.log")[1])
+            print(machine.execute("tail -n 100 /var/log/cloudstack/usage/usage.log")[1])
+            print(machine.execute("journalctl -n 50 --no-pager -u cloudstack-usage")[1])
             raise
 
     # CloudMonkey's defaults (admin/password on localhost:8080) match the
@@ -81,6 +85,22 @@
         )
         machine.succeed("cloudstack-cloudmonkey sync")
         assert cmk("list", "apis", name="configureSimulator")["count"] == 1
+
+    with subtest("the usage server starts on the upgraded database"), logs_on_failure():
+        machine.wait_for_unit("cloudstack-usage.service")
+        # It registers a job once it runs.
+        machine.wait_until_succeeds(
+            "mariadb --batch --skip-column-names -e 'SELECT COUNT(*) FROM cloud_usage.usage_job' | grep -qvx 0",
+            timeout=timedelta(minutes=5),
+        )
+        # It waited for the database rather than fail and restart.
+        machine.succeed("systemctl show -P NRestarts cloudstack-usage | grep -qx 0")
+        machine.succeed("test -s /var/log/cloudstack/usage/usage.log")
+        machine.succeed("grep -qx 1 /usr/local/libexec/sanity-check-last-id")
+        # Jobs every 2 minutes, up to the current time, rather than daily for
+        # the day before: the usage server reads this when it starts.
+        cmk("update", "configuration", name="usage.stats.job.aggregation.range", value="2")
+        machine.systemctl("restart cloudstack-usage.service")
 
     with subtest("an advanced zone deploys on simulated hosts"), logs_on_failure():
         zone = cmk(
@@ -173,6 +193,16 @@
         router = cmk("list", "routers", networkid=network["id"])["router"][0]
         assert router["state"] == "Running", f"unexpected router state {router['state']}"
 
+    with subtest("the usage server records the VM's running time"), logs_on_failure():
+        today = machine.succeed("date -u +%F").strip()
+        # An immediate job, besides the recurring ones.
+        cmk("generate", "usagerecords")
+        wait_for(
+            f'any(.usagerecord[]?; .usageid == "{vm["id"]}")',
+            "list", "usagerecords", startdate=today, enddate=today, type=1,
+        )
+
+    with subtest("the VM is destroyed"), logs_on_failure():
         cmk("destroy", "virtualmachine", id=vm["id"], expunge="true")
         assert cmk("list", "virtualmachines", zoneid=zone["id"]).get("count", 0) == 0
 
