@@ -8,8 +8,8 @@ cover the management server, its database setup and the web UI; deploy a zone
 with a VM on the simulator hypervisor, which the usage server bills; and deploy a
 zone on a KVM host with NFS storage, up to a guest VM in an isolated network,
 reached through its virtual router, its console opened through the console
-proxy over TLS, and live-migrated to a second host. See [Roadmap](#roadmap) for
-what is not covered yet.
+proxy over TLS, and live-migrated to a second host, then a UEFI VM. See
+[Roadmap](#roadmap) for what is not covered yet.
 
 ## Outputs
 
@@ -29,7 +29,7 @@ what is not covered yet.
 | `checks.x86_64-linux.upstream-files` | Fails when a CloudStack bump changes upstream files that the flake follows by hand, see [Following upstream](#following-upstream) |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor, and the usage server's records for the VM |
-| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and its console over TLS, and live-migrated (needs nested virtualisation) |
+| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and its console over TLS, and live-migrated, then a UEFI VM (needs nested virtualisation) |
 
 ## Usage
 
@@ -117,8 +117,8 @@ Its job runs once a day by default, for the day before: see the global settings
 minutes), which the usage server reads when it starts, so restart it after
 changing them. `generateUsageRecords` runs a job right away. The usage sanity
 check (`usage.sanity.check.interval`, off by default) keeps its state in
-`/usr/local/libexec/sanity-check-last-id`, a path fixed in the Java code, which
-the module creates.
+`/var/lib/cloudstack/usage/sanity-check-last-id`, rather than upstream's
+`/usr/local/libexec`.
 
 ### Exploring a simulated zone
 
@@ -147,6 +147,7 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 | `/var/log/cloudstack/management` | `management-server.log`, `apilog.log`, `access.log` |
 | `/run/cloudstack-management/conf` | Generated configuration, secrets included |
 | `/var/log/cloudstack/usage` | `usage.log`, with `usage.enable` |
+| `/var/lib/cloudstack/usage` | The usage sanity check's state, with `usage.enable` |
 | `/run/cloudstack-usage/conf` | The usage server's generated configuration, secrets included |
 
 ## KVM hosts
@@ -210,8 +211,9 @@ it, the VM reaches it through source NAT. It also opens the VM's console
 through the console proxy, as the web UI's noVNC client does, and checks that
 the console proxy reached the VM's VNC server over TLS. Then a second KVM host
 joins the cluster, the VM is live-migrated to it and stays reachable, its
-console too, and the test destroys it. The KVM hosts are themselves VMs, so the
-test needs nested virtualisation.
+console too, and the test destroys it. Last, it deploys a VM with UEFI firmware
+on the first host. The KVM hosts are themselves VMs, so the test needs nested
+virtualisation.
 
 The secondary storage VM refuses to download templates from private addresses
 unless they are in the global setting `secstorage.allowed.internal.sites`, which
@@ -262,9 +264,11 @@ the management server only reads when it starts.
   restart by `cloudstack-setup-agent -s` applies it to the VMs started
   afterwards; until then VNC is plain. `openFirewall` opens the VNC ports
   (5900-6100).
-
-Not set up yet: UEFI guests (the agent detects UEFI support by asking `dpkg` or
-`rpm` whether an `ovmf` package is installed, so it reports none).
+- UEFI guests (`boottype=UEFI`), with the firmware of libvirtd's QEMU, which
+  `settings.uefi` names. The secure boot firmware has no keys enrolled. The
+  agent reports UEFI support, which the management server requires to place
+  UEFI VMs on the host, when that firmware exists; upstream's asks `dpkg` or
+  `rpm` whether an `ovmf` package is installed.
 
 ### Paths
 
@@ -325,15 +329,21 @@ On purpose, because NixOS manages the system declaratively:
 - NixOS paths: the agent's UEFI firmware (QEMU's), libvirt's PKI files in
   `/var/lib/pki`, the links and markers the management server's host setup
   expects (`/usr/share/cloudstack-common`, `/etc/libvirt/libvirtd.conf`), and
-  `/usr/local/libexec/sanity-check-last-id` for the usage server.
+  `/var/lib/cloudstack/usage/sanity-check-last-id` for the usage server.
 - The MySQL settings come from the installation guide, which is not in the
   source tree, so `checks.upstream-files` cannot follow them.
 - Source changes, all in `pkgs/cloudstack/build.nix`:
   - `"/bin/bash"` becomes `"bash"`, resolved from `PATH`. Not a store path:
     the same jars run inside the Debian system VMs.
   - `genisoimage` is also looked up in `PATH`; the ipmitool default is `ipmitool`.
+  - The KVM agent runs `systemctl` (rolling maintenance), `lvs` and `lvchange`
+    (CLVM) and `test` (multipath) from `PATH` rather than `/bin` and
+    `/usr/sbin`.
+  - The KVM agent reports UEFI support when the firmware of `uefi.properties`
+    exists, rather than when `dpkg` or `rpm` report an `ovmf` package.
   - The install paths of the system VM template metadata, the CKS configuration
-    and the extensions become Java system properties, set by the launcher.
+    and the extensions, and the usage sanity check's state file, become Java
+    system properties, set by the launchers.
   - The simulator hypervisor plugin is built, but not into the client jar: it
     replaces the NFS secondary storage provider, so it only goes on the
     classpath with `simulator.enable`.
@@ -385,13 +395,4 @@ To bump CloudStack:
 
 ## Roadmap
 
-- With the next Maven rebuild, Java changes:
-  - agent: detect UEFI support from the firmware files rather than from
-    `dpkg`/`rpm`;
-  - agent: resolve `/bin/systemctl` (rolling maintenance), `/usr/sbin/lvs` and
-    `/usr/sbin/lvchange` (CLVM) and `/bin/test` (multipath) from `PATH`;
-  - usage server: take the sanity check's state file from a setting rather
-    than `/usr/local/libexec`;
-  - require the agent and usage server artifacts in `build.nix`, which only
-    keeps them if present.
 - CI with a binary cache, so nobody rebuilds the Maven reactor locally.

@@ -3,8 +3,9 @@
 # connects back; with NFS primary and secondary storage, the zone then starts
 # its system VMs on the host, and a guest VM in an isolated network, which is
 # reached through its virtual router and its console through the console proxy
-# over TLS, then live-migrated to a second host. The KVM hosts are themselves
-# VMs, so this needs nested virtualisation on the machine running the test.
+# over TLS, then live-migrated to a second host; then a VM with UEFI firmware.
+# The KVM hosts are themselves VMs, so this needs nested virtualisation on the
+# machine running the test.
 { self }:
 let
   kvmHost =
@@ -190,10 +191,14 @@ in
       kvmIP = nodes.kvm.networking.primaryIPAddress;
       kvm2IP = nodes.kvm2.networking.primaryIPAddress;
       nfsIP = nodes.nfs.networking.primaryIPAddress;
+      uefi = nodes.kvm.services.cloudstack.agent.settings.uefi;
+      uefiLoader = uefi."guest.loader.legacy";
+      uefiVars = uefi."guest.nvram.template.legacy";
     in
     ''
       import json
       import shlex
+      import xml.etree.ElementTree as ET
       from contextlib import contextmanager
       from datetime import timedelta
 
@@ -351,6 +356,8 @@ in
           host = cmk("list", "hosts", type="Routing", zoneid=zone["id"])["host"][0]
           assert host["hypervisor"] == "KVM", f"unexpected hypervisor {host['hypervisor']}"
           assert host["ipaddress"] == "${kvmIP}", f"unexpected host address {host['ipaddress']}"
+          # The agent found the UEFI firmware of uefi.properties.
+          assert host.get("ueficapability") is True, f"UEFI capability {host.get('ueficapability')}"
 
       with subtest("the agent reconnects after a restart"), logs_on_failure():
           def connections():
@@ -520,5 +527,27 @@ in
       with subtest("the VM is destroyed and removed from the KVM host"), logs_on_failure():
           cmk("destroy", "virtualmachine", id=vm["id"], expunge="true")
           kvm2.wait_until_fails(f"virsh domstate {vm['instancename']}", timeout=300)
+
+      with subtest("a UEFI VM runs with the firmware of libvirtd's QEMU"), logs_on_failure():
+          # Only hosts that report UEFI support get UEFI VMs. The template
+          # boots with a BIOS, which does not matter here: the VM runs the
+          # firmware.
+          uefi_vm = cmk(
+              "deploy", "virtualmachine",
+              zoneid=zone["id"], templateid=template["id"], serviceofferingid=service_offering["id"],
+              networkids=network["id"], name="uefi", hostid=host["id"],
+              boottype="UEFI", bootmode="LEGACY",
+          )["virtualmachine"]
+          assert uefi_vm["state"] == "Running", f"unexpected VM state {uefi_vm['state']}"
+          domain = ET.fromstring(kvm.succeed(f"virsh dumpxml {uefi_vm['instancename']}"))
+          loader = domain.findtext("os/loader")
+          assert loader == "${uefiLoader}", f"unexpected loader {loader}"
+          # Its variables, from the template of uefi.properties.
+          nvram = domain.find("os/nvram")
+          assert nvram is not None, "the VM has no UEFI variables"
+          assert nvram.get("template") == "${uefiVars}", f"unexpected variables template {nvram.get('template')}"
+          kvm.succeed(f"test -s {nvram.text}")
+          cmk("destroy", "virtualmachine", id=uefi_vm["id"], expunge="true")
+          kvm.wait_until_fails(f"virsh domstate {uefi_vm['instancename']}", timeout=300)
     '';
 }

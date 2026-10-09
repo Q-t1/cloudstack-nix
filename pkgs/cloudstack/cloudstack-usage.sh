@@ -17,11 +17,15 @@ set -eu
 conf_dir="${CLOUDSTACK_CONF_DIR:-/etc/cloudstack/usage}"
 
 # The usage server records its process id with its jobs, from -Dpid, which
-# upstream's unit sets to the shell's; exec keeps it.
+# upstream's unit sets to the shell's; exec keeps it. The system property
+# after upstream's options replaces the path of the sanity check's state
+# file, /usr/local/libexec/sanity-check-last-id upstream, which this
+# package's build patches out of the code.
 # shellcheck disable=SC2086
 exec "@jre@/bin/java" \
   -Dpid=$$ \
   @upstreamJavaOpts@ \
+  -Dcloudstack.usage.sanity.check.file=/var/lib/cloudstack/usage/sanity-check-last-id \
   ${JAVA_DEBUG:-} \
   ${JAVA_OPTS:-} \
   -cp "@upstreamClasspath@" \
