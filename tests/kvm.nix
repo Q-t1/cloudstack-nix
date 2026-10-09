@@ -1,8 +1,9 @@
 # Deploys an advanced zone on a KVM host: the management server sets the host
 # up over SSH (certificates, then cloudstack-setup-agent) and the agent
 # connects back; with NFS primary and secondary storage, the zone then starts
-# its system VMs on the host. The KVM host is itself a VM, so this needs
-# nested virtualisation on the machine running the test.
+# its system VMs on the host, and a guest VM in an isolated network, which is
+# reached through its virtual router. The KVM host is itself a VM, so this
+# needs nested virtualisation on the machine running the test.
 { self }:
 {
   name = "cloudstack-kvm";
@@ -72,12 +73,22 @@
         services.cloudstack.agent.enable = true;
       };
 
+    # Also the public network's gateway, for the guest network's traffic in
+    # and out.
     nfs =
       { pkgs, ... }:
       {
         # CloudStack allocates the virtual size of each disk (5 GB per system
         # VM, from the template) against twice the size of the export.
         virtualisation.diskSize = 16384;
+
+        networking.interfaces.eth1.ipv4.addresses = [
+          {
+            address = "192.168.2.1";
+            prefixLength = 24;
+          }
+        ];
+        environment.systemPackages = [ pkgs.sshpass ];
 
         services.nfs.server = {
           enable = true;
@@ -90,16 +101,20 @@
         # NFSv3 clients also need rpcbind and mountd, on changing ports.
         networking.firewall.enable = false;
 
-        # A guest template, which the secondary storage VM downloads. Its disk
-        # is blank: the VM runs, but boots nothing.
+        # A guest template, which the secondary storage VM downloads:
+        # macchinina, the 20 MB image of upstream's smoke tests. It configures
+        # its network with DHCP and gets its root password from the virtual
+        # router.
         services.nginx = {
           enable = true;
           virtualHosts.templates = {
             default = true;
-            root = pkgs.runCommand "cloudstack-test-templates" { nativeBuildInputs = [ pkgs.qemu-utils ]; } ''
-              mkdir "$out"
-              qemu-img create -f qcow2 "$out/blank.qcow2" 1G
-            '';
+            root = pkgs.linkFarm "cloudstack-test-templates" {
+              "macchinina-kvm.qcow2.bz2" = pkgs.fetchurl {
+                url = "http://dl.openvm.eu/cloudstack/macchinina/x86_64/macchinina-kvm.qcow2.bz2";
+                hash = "sha256-vEzAQLurhDAA+reNtstKM/OgauHO0s9WPTazjH/uMEk=";
+              };
+            };
           };
         };
       };
@@ -282,11 +297,13 @@
               kvm.succeed(f"virsh domstate {vm['name']} | grep -qx running")
 
       with subtest("a template is downloaded from a URL"), logs_on_failure():
+          # As upstream's smoke tests register it.
           ostype = cmk("list", "ostypes", description="Other Linux (64-bit)")["ostype"][0]
           template = cmk(
               "register", "template",
-              name="blank", displaytext="blank", url="http://${nfsIP}/blank.qcow2",
+              name="macchinina", displaytext="macchinina", url="http://${nfsIP}/macchinina-kvm.qcow2.bz2",
               format="QCOW2", hypervisor="KVM", ostypeid=ostype["id"], zoneid=zone["id"],
+              passwordenabled="true",
           )["template"][0]
           wait_for(
               ".template[0].isready",
@@ -318,6 +335,52 @@
           broadcast_uri = cmk("list", "networks", id=network["id"])["network"][0]["broadcasturi"]
           vlan = broadcast_uri.removeprefix("vlan://")
           kvm.succeed(f"test -d /sys/class/net/breth1-{vlan}/brif/eth1.{vlan}")
+
+      with subtest("the VM gets its address from the virtual router"), logs_on_failure():
+          nic = vm["nic"][0]
+          # How the agent configures the router: over its link-local address,
+          # with the key that the management server sent to the host.
+          router_ssh = shlex.join([
+              "ssh", "-i", "/root/.ssh/id_rsa.cloud", "-p", "3922",
+              "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+              f"root@{router['linklocalip']}",
+          ])
+          kvm.wait_until_succeeds(
+              f"{router_ssh} grep -q 'DHCPACK.* {nic['ipaddress']} {nic['macaddress']}' /var/log/dnsmasq.log",
+              timeout=300,
+          )
+          # Once the guest has configured it.
+          kvm.wait_until_succeeds(f"{router_ssh} ping -c 1 -W 2 {nic['ipaddress']}", timeout=60)
+
+      with subtest("the VM is reachable through port forwarding"), logs_on_failure():
+          public_ip = cmk(
+              "list", "publicipaddresses", associatednetworkid=network["id"], issourcenat="true"
+          )["publicipaddress"][0]
+          cmk(
+              "create", "portforwardingrule",
+              ipaddressid=public_ip["id"], protocol="TCP", publicport="22", privateport="22",
+              virtualmachineid=vm["id"],
+          )
+          # The password that CloudStack generated for the VM, which the guest
+          # gets from the virtual router's password server once it has started
+          # its SSH server.
+          guest_ssh = shlex.join([
+              "sshpass", "-p", vm["password"],
+              "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+              f"root@{public_ip['ipaddress']}",
+          ])
+          nfs.wait_until_succeeds(f"{guest_ssh} true", timeout=300)
+          # Its SSH server runs commands with /usr/bin:/bin in PATH.
+          nfs.succeed(f"{guest_ssh} /sbin/ip -4 address show eth0 | grep -q 'inet {nic['ipaddress']}/'")
+          nfs.succeed(f"{guest_ssh} /sbin/ip route | grep -q '^default via {nic['gateway']} '")
+
+      with subtest("the VM reaches out through source NAT once egress is allowed"), logs_on_failure():
+          fetch = f"{guest_ssh} curl -sfI --max-time 10 http://192.168.2.1/macchinina-kvm.qcow2.bz2"
+          # The network offering denies egress by default.
+          nfs.fail(fetch)
+          cmk("create", "egressfirewallrule", networkid=network["id"], protocol="TCP", startport="80", endport="80")
+          nfs.succeed(fetch)
+          nfs.succeed(f"grep -q '^{public_ip['ipaddress']} .*\"HEAD /macchinina-kvm.qcow2.bz2 ' /var/log/nginx/access.log")
 
       with subtest("the VM is destroyed and removed from the KVM host"), logs_on_failure():
           cmk("destroy", "virtualmachine", id=vm["id"], expunge="true")
