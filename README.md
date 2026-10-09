@@ -6,8 +6,9 @@ KVM agent, built from source with Nix and run as NixOS services.
 Currently packages **CloudStack 4.23.0.0**. NixOS VM tests cover the management
 server, its database setup and the web UI, deploy a zone with a VM on the
 simulator hypervisor, and deploy a zone on a KVM host with NFS storage, up to a
-guest VM in an isolated network. Live migration and the usage server are not
-covered yet, see [Roadmap](#roadmap).
+guest VM in an isolated network, reached through its virtual router and
+live-migrated to a second host. The usage server is not covered yet, see
+[Roadmap](#roadmap).
 
 ## Outputs
 
@@ -25,7 +26,7 @@ covered yet, see [Roadmap](#roadmap).
 | `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management` and `cloudstack-agent` |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor |
-| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on a KVM host with NFS storage, its system VMs and a guest VM (needs nested virtualisation) |
+| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and live-migrated (needs nested virtualisation) |
 
 ## Usage
 
@@ -123,7 +124,7 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 
   services.cloudstack.agent = {
     enable = true;
-    # VNC ports of the VMs, for the console proxy.
+    # VNC ports of the VMs, for the console proxy, and live migration.
     openFirewall = true;
   };
 
@@ -154,7 +155,7 @@ When the host is added, the management server logs in over SSH and
 
 1. has the host generate a key pair and a certificate request (`keystore-setup`),
    signs it with its CA and installs the certificate (`keystore-cert-import`),
-   all in `/etc/cloudstack/agent`;
+   all in `/etc/cloudstack/agent`, then has libvirtd listen with TLS;
 2. runs `cloudstack-setup-agent`, which records the zone, pod, cluster, guid,
    management servers and network devices in `agent.properties` and starts the
    agent. Upstream's version also rewrites the host's network, libvirt,
@@ -166,9 +167,15 @@ The agent then connects to the management server on port 8250.
 `tests/kvm.nix` deploys such a zone: a management server, a KVM host and an NFS
 server for primary and secondary storage, with the system VM template from
 `systemVmTemplates`. It waits for the secondary storage VM and the console proxy
-to run on the host, registers a template from a URL, then deploys a VM in an
-isolated network, with its virtual router, and destroys it. The KVM host is
-itself a VM, so the test needs nested virtualisation.
+to run on the host, registers a template from a URL (macchinina, the small image
+of upstream's smoke tests), then deploys a VM in an isolated network. The VM
+gets its address and its password from the network's virtual router. The NFS
+server also plays the public network's gateway: it logs into the VM through
+port forwarding on the network's public address, and once an egress rule allows
+it, the VM reaches it through source NAT. Then a second KVM host joins the
+cluster, the VM is live-migrated to it and stays reachable, and the test
+destroys it. The KVM hosts are themselves VMs, so the test needs nested
+virtualisation.
 
 The secondary storage VM refuses to download templates from private addresses
 unless they are in the global setting `secstorage.allowed.internal.sites`, which
@@ -197,10 +204,20 @@ the management server only reads when it starts.
 - `br_netfilter` for security groups, `8021q` for guest VLANs, NFS client
   support (libvirtd mounts NFS storage pools itself, so `mount` is in its
   `PATH`), and `/var/lib/libvirt/images` for host-local primary storage.
+- libvirtd's TLS socket (port 16514), for live migration: the agent migrates
+  over `qemu+tls` to hosts secured with a certificate, and otherwise over
+  unauthenticated `qemu+tcp`, which is not set up. The socket waits for the
+  certificate that the management server issues when it adds the host; then
+  `keystore-cert-import` runs `cloudstack-setup-agent -s`, which starts the
+  socket and restarts libvirtd (VMs keep running), also when the certificate
+  is renewed. libvirt on NixOS reads its PKI files from `/var/lib/pki` rather
+  than `/etc/pki`, where `keystore-cert-import` links them, so the module
+  links them there too. `openFirewall` opens 16514 and QEMU's migration ports
+  (49152-49215).
 
-Not set up yet: live migration (libvirtd does not listen on the network) and
-UEFI guests (the agent detects UEFI support by asking `dpkg` or `rpm` whether
-an `ovmf` package is installed, so it reports none).
+Not set up yet: VNC over TLS for the console proxy (upstream enables it on
+secured hosts), and UEFI guests (the agent detects UEFI support by asking
+`dpkg` or `rpm` whether an `ovmf` package is installed, so it reports none).
 
 ### Paths
 
@@ -209,6 +226,7 @@ an `ovmf` package is installed, so it reports none).
 | `/var/lib/cloudstack/agent` | `agent.properties`, the agent's keystore and certificates; `/etc/cloudstack/agent` links here |
 | `/var/log/cloudstack/agent` | `agent.log` |
 | `/usr/share/cloudstack-common` | Scripts and system VM patch files, at the path the management server uses |
+| `/var/lib/pki` | libvirt's CA, certificates and keys: links to the host's certificate in `/var/lib/cloudstack/agent` |
 
 ## Differences from the upstream packages
 
@@ -260,11 +278,6 @@ the code they patch.
 
 ## Roadmap
 
-- Guest connectivity in `tests/kvm.nix`: its guest template is a blank disk, so
-  the VM runs but boots nothing. A small bootable image would let the test
-  check that the guest gets its address from the virtual router.
-- KVM live migration: libvirtd listening with TLS, using the certificates the
-  management server installs in `/etc/cloudstack/agent`.
 - With the next Maven rebuild, Java changes for the agent:
   - detect UEFI support from the firmware files rather than from `dpkg`/`rpm`;
   - resolve `/bin/systemctl` (rolling maintenance), `/usr/sbin/lvs` and
