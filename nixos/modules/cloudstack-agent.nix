@@ -222,6 +222,12 @@ in
       hooks.qemu.cloudstack = "${share}/cloudstack-agent/lib/libvirtqemuhook";
     };
 
+    # libvirtd mounts NFS storage pools itself, with the mount in its PATH.
+    systemd.services.libvirtd.path = [
+      pkgs.util-linux
+      pkgs.nfs-utils
+    ];
+
     # The keystore scripts take libvirtd.conf as the sign that they run on a
     # KVM host rather than in a system VM (where keystore-cert-import would
     # wait forever), and read the QEMU group from qemu.conf. libvirtd itself
