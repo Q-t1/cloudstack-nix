@@ -96,13 +96,23 @@ let
         done
       '';
 
+  # Upstream's file from the package, with the entries of `settings` in place
+  # of its entries with the same keys.
+  layeredProperties =
+    file: settings:
+    pkgs.runCommand "cloudstack-agent-${file}" { } ''
+      ${pkgs.gawk}/bin/awk -f ${./merge-properties.awk} \
+        ${propertiesFormat.generate file settings} ${share}/cloudstack-agent/conf/${file} > "$out"
+    '';
+
   settingsOption =
     file: extraDescription:
     lib.mkOption {
       type = lib.types.submodule { freeformType = propertiesFormat.type; };
       default = { };
       description = ''
-        Entries of {file}`${file}`. ${extraDescription}
+        Entries of {file}`${file}`, in place of the entries of upstream's file
+        with the same keys. ${extraDescription}
       '';
     };
 
@@ -141,19 +151,24 @@ in
         file.
       '';
       uefi = settingsOption "uefi.properties" ''
-        The defaults use the UEFI firmware shipped with QEMU.
+        The defaults replace upstream's Debian firmware paths with the UEFI
+        firmware shipped with QEMU.
       '';
-      environment = settingsOption "environment.properties" "";
+      environment = settingsOption "environment.properties" ''
+        The default points `paths.script` at the scripts that the management
+        server's host setup runs.
+      '';
     };
 
     javaOptions = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [
-        "-Xms256m"
-        "-Xmx2048m"
-        "-Djava.io.tmpdir=${tmpDir}"
-      ];
-      description = "JVM options. They are word-split, so they cannot contain spaces.";
+      default = [ ];
+      example = [ "-Xmx4g" ];
+      description = ''
+        Extra JVM options. They come after upstream's (its
+        {file}`packaging/systemd/cloudstack-agent.default`), so they override
+        them. They are word-split, so they cannot contain spaces.
+      '';
     };
 
     logConfig = lib.mkOption {
@@ -209,7 +224,6 @@ in
         "guest.nvram.path" = "/var/lib/libvirt/qemu/nvram/";
       };
       environment = lib.mapAttrs (_: lib.mkDefault) {
-        "paths.pid" = "/run";
         "paths.script" = commonLink;
       };
     };
@@ -345,35 +359,14 @@ in
         # Declared entries replace the file's entries with the same keys, or
         # are appended. The file is replaced atomically, as the setup scripts
         # do.
-        awk '
-          function key(line) {
-            sub(/^[ \t\f]+/, "", line)
-            if (line ~ /^[#!]/ || !match(line, /^([^=: \t\f\\]|\\.)+/)) return ""
-            return substr(line, 1, RLENGTH)
-          }
-          NR == FNR {
-            k = key($0)
-            if (k != "") { declared[k] = $0; order[++n] = k }
-            next
-          }
-          { k = key($0) }
-          k != "" && (k in declared) {
-            if (!(k in written)) print declared[k]
-            written[k] = 1
-            next
-          }
-          { print }
-          END {
-            for (i = 1; i <= n; i++)
-              if (!(order[i] in written)) print declared[order[i]]
-          }
-        ' ${propertiesFormat.generate "agent.properties" cfg.settings.agent} "$props" \
+        awk -f ${./merge-properties.awk} \
+          ${propertiesFormat.generate "agent.properties" cfg.settings.agent} "$props" \
           > ${confDir}/.agent.properties.new
         chmod --reference="$props" ${confDir}/.agent.properties.new
         mv ${confDir}/.agent.properties.new "$props"
 
-        ln -sfn ${propertiesFormat.generate "environment.properties" cfg.settings.environment} ${confDir}/environment.properties
-        ln -sfn ${propertiesFormat.generate "uefi.properties" cfg.settings.uefi} ${confDir}/uefi.properties
+        ln -sfn ${layeredProperties "environment.properties" cfg.settings.environment} ${confDir}/environment.properties
+        ln -sfn ${layeredProperties "uefi.properties" cfg.settings.uefi} ${confDir}/uefi.properties
         ln -sfn ${cfg.logConfig} ${confDir}/log4j-cloud.xml
 
         mkdir -p ${tmpDir}

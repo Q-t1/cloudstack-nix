@@ -66,29 +66,10 @@ let
         '';
 
   # Commands the management server runs through sudo, from upstream's
-  # server/conf/cloudstack-sudoers.in (secondary storage mounts, system VM
-  # template seeding). sudo looks them up in the service PATH and matches the
-  # result against these rules, so these packages come first in that PATH.
-  sudoPackages = [
-    pkgs.coreutils
-    pkgs.findutils
-    pkgs.util-linux
-    pkgs.qemu-utils
-    jre
-  ];
-  sudoCommands = [
-    "${pkgs.coreutils}/bin/mkdir"
-    "${pkgs.coreutils}/bin/cp"
-    "${pkgs.coreutils}/bin/chmod"
-    "${pkgs.coreutils}/bin/touch"
-    "${pkgs.coreutils}/bin/df"
-    "${pkgs.coreutils}/bin/ls"
-    "${pkgs.findutils}/bin/find"
-    "${pkgs.util-linux}/bin/mount"
-    "${pkgs.util-linux}/bin/umount"
-    "${pkgs.qemu-utils}/bin/qemu-img"
-    "${jre}/bin/keytool"
-  ];
+  # server/conf/cloudstack-sudoers.in, see sudo-commands.nix.
+  sudo = pkgs.callPackage ../../pkgs/cloudstack/sudo-commands.nix { inherit jre; };
+  sudoPackages = sudo.packages;
+  sudoCommands = lib.unique (lib.attrValues sudo.commands);
   sudoRule = {
     users = [ "cloud" ];
     runAs = "root";
@@ -169,9 +150,33 @@ let
     }
   '';
 
-  # Shell code for a unit with the database credentials (LoadCredential):
-  # defines `property KEY CREDENTIAL`, which prints a .properties entry from a
-  # credential, and writes db.properties, with the secrets, into dir.
+  # The connection entries that cloudstack-setup-databases writes for the
+  # cloud and usage databases.
+  databaseConnection = name: {
+    "db.${name}.username" = cfg.database.user;
+    "db.${name}.host" = cfg.database.host;
+    "db.${name}.port" = cfg.database.port;
+  };
+
+  # Upstream's configuration file, as shipped in the package, with the
+  # entries of settings in place of its entries with the same keys. The
+  # secrets go in when the service starts.
+  layeredProperties =
+    file: settings:
+    pkgs.runCommand "cloudstack-management-${file}" { } ''
+      ${pkgs.gawk}/bin/awk -f ${./merge-properties.awk} \
+        ${propertiesFormat.generate file settings} ${share}/cloudstack-management/conf/${file} > "$out"
+    '';
+  dbProperties = layeredProperties "db.properties" cfg.settings.db;
+  serverProperties = layeredProperties "server.properties" cfg.settings.server;
+  environmentProperties = layeredProperties "environment.properties" cfg.settings.environment;
+
+  # Shell code for a unit with the database credentials (LoadCredential), run
+  # with `set -euo pipefail`: defines `property KEY CREDENTIAL`, which prints
+  # a .properties entry from a credential, and `withSecrets BASE OUT`, which
+  # writes BASE to OUT with the entries read from stdin in place of BASE's
+  # entries with the same keys. Then writes db.properties, with the secrets,
+  # into dir.
   writeDbProperties = dir: ''
     # Java reads .properties files as ISO-8859-1, so secrets should be ASCII.
     property() {
@@ -183,14 +188,16 @@ let
       fi
       printf '%s=%s\n' "$1" "''${value//\\/\\\\}"
     }
+    withSecrets() {
+      ${pkgs.gawk}/bin/awk -f ${./merge-properties.awk} - "$1" > "$2"
+    }
 
     {
-      cat ${propertiesFormat.generate "db.properties" cfg.settings.db}
       property db.cloud.password db-password
       property db.usage.password db-password
       property db.cloud.encrypt.secret database-secret-key
       ${lib.optionalString cfg.simulator.enable "property db.simulator.password db-password"}
-    } > ${dir}/db.properties
+    } | withSecrets ${dbProperties} ${dir}/db.properties
   '';
 
   # The credentials behind writeDbProperties, and the encryption key file.
@@ -206,7 +213,9 @@ let
       type = lib.types.submodule { freeformType = propertiesFormat.type; };
       default = { };
       description = ''
-        Entries of {file}`${file}`, merged over defaults that follow upstream.
+        Entries of {file}`${file}`, in place of the entries of upstream's file
+        with the same keys (upstream's other entries are kept). The defaults
+        set what upstream's setup tools would, from this module's options.
         ${extraDescription}
       '';
     };
@@ -353,16 +362,13 @@ in
 
     javaOptions = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [
-        "-Xmx2G"
-        "-XX:+UseParallelGC"
-        "-XX:MaxGCPauseMillis=500"
-        "-XX:+HeapDumpOnOutOfMemoryError"
-        "-XX:HeapDumpPath=${logDir}"
-        "-XX:ErrorFile=${logDir}/cloudstack-management.err"
-        "-Djava.io.tmpdir=/var/tmp"
-      ];
-      description = "JVM options. They are word-split, so they cannot contain spaces.";
+      default = [ ];
+      example = [ "-Xmx4G" ];
+      description = ''
+        Extra JVM options. They come after upstream's (its
+        {file}`packaging/systemd/cloudstack-management.default`), so they
+        override them. They are word-split, so they cannot contain spaces.
+      '';
     };
 
     logConfig = lib.mkOption {
@@ -453,13 +459,12 @@ in
 
       javaOptions = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [
-          "-Xms256m"
-          "-Xmx2048m"
-        ];
+        default = [ ];
+        example = [ "-Xmx4g" ];
         description = ''
-          JVM options of the usage server. They are word-split, so they cannot
-          contain spaces.
+          Extra JVM options of the usage server. They come after upstream's
+          (its {file}`packaging/systemd/cloudstack-usage.default`), so they
+          override them. They are word-split, so they cannot contain spaces.
         '';
       };
     };
@@ -497,109 +502,29 @@ in
       }
     ];
 
+    # What upstream's cloudstack-setup-databases writes into db.properties,
+    # and what this module's options and paths decide. Everything else comes
+    # from upstream's files, see settings.
     services.cloudstack.management.settings = {
       db = lib.mapAttrs (_: lib.mkDefault) (
         {
           "cluster.node.IP" = cfg.nodeAddress;
-          "cluster.servlet.port" = 9090;
-          "region.id" = 1;
-
-          "db.cloud.username" = cfg.database.user;
-          "db.cloud.host" = cfg.database.host;
-          "db.cloud.port" = cfg.database.port;
-          "db.cloud.name" = "cloud";
-          "db.cloud.driver" = "jdbc:mysql";
-          "db.cloud.uri" = "";
-          "db.cloud.connectionPoolLib" = "hikaricp";
-          "db.cloud.maxActive" = 250;
-          "db.cloud.maxIdle" = 30;
-          "db.cloud.maxWait" = 600000;
-          "db.cloud.minIdleConnections" = 5;
-          "db.cloud.connectionTimeout" = 30000;
-          "db.cloud.keepAliveTime" = 600000;
-          "db.cloud.validationQuery" = "/* ping */ SELECT 1";
-          "db.cloud.testOnBorrow" = true;
-          "db.cloud.testWhileIdle" = true;
-          "db.cloud.timeBetweenEvictionRunsMillis" = 40000;
-          "db.cloud.minEvictableIdleTimeMillis" = 240000;
-          "db.cloud.poolPreparedStatements" = false;
-          "db.cloud.url.params" =
-            "prepStmtCacheSize=517&cachePrepStmts=true&sessionVariables=sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'&serverTimezone=UTC";
-          "db.cloud.useSSL" = false;
-          "db.cloud.keyStore" = "";
-          "db.cloud.keyStorePassword" = "";
-          "db.cloud.trustStore" = "";
-          "db.cloud.trustStorePassword" = "";
-          # Encryption must be on for the database secret to be used; the key
-          # file is read from the configuration directory.
+          # The key file and the database secret are used with encryption
+          # on; the key file is read from the configuration directory.
           "db.cloud.encryption.type" = "file";
           "db.cloud.encryptor.version" = "V2";
-          "db.cloud.replicas" = "localhost,localhost";
-          "db.cloud.autoReconnect" = true;
-          "db.cloud.failOverReadOnly" = false;
-          "db.cloud.reconnectAtTxEnd" = true;
-          "db.cloud.autoReconnectForPools" = true;
-          "db.cloud.secondsBeforeRetrySource" = 3600;
-          "db.cloud.queriesBeforeRetrySource" = 5000;
-          "db.cloud.initialTimeout" = 3600;
-
-          "db.usage.username" = cfg.database.user;
-          "db.usage.host" = cfg.database.host;
-          "db.usage.port" = cfg.database.port;
-          "db.usage.name" = "cloud_usage";
-          "db.usage.driver" = "jdbc:mysql";
-          "db.usage.uri" = "";
-          "db.usage.connectionPoolLib" = "hikaricp";
-          "db.usage.maxActive" = 100;
-          "db.usage.maxIdle" = 30;
-          "db.usage.maxWait" = 600000;
-          "db.usage.minIdleConnections" = 5;
-          "db.usage.connectionTimeout" = 30000;
-          "db.usage.keepAliveTime" = 600000;
-          "db.usage.url.params" = "serverTimezone=UTC";
-          "db.usage.replicas" = "localhost,localhost";
-          "db.usage.autoReconnect" = true;
-          "db.usage.failOverReadOnly" = false;
-          "db.usage.reconnectAtTxEnd" = true;
-          "db.usage.autoReconnectForPools" = true;
-          "db.usage.secondsBeforeRetrySource" = 3600;
-          "db.usage.queriesBeforeRetrySource" = 5000;
-          "db.usage.initialTimeout" = 3600;
-
-          "db.ha.enabled" = false;
-          "db.ha.loadBalanceStrategy" = "com.cloud.utils.db.StaticStrategy";
         }
-        // lib.optionalAttrs cfg.simulator.enable {
-          "db.simulator.username" = cfg.database.user;
-          "db.simulator.host" = cfg.database.host;
-          "db.simulator.port" = cfg.database.port;
-          "db.simulator.name" = "simulator";
-          "db.simulator.driver" = "jdbc:mysql";
-          "db.simulator.uri" = "";
-          "db.simulator.connectionPoolLib" = "hikaricp";
-          "db.simulator.maxActive" = 250;
-          "db.simulator.maxIdle" = 30;
-          "db.simulator.maxWait" = 600000;
-          "db.simulator.minIdleConnections" = 5;
-          "db.simulator.connectionTimeout" = 30000;
-          "db.simulator.keepAliveTime" = 600000;
-          "db.simulator.autoReconnect" = true;
-        }
+        // databaseConnection "cloud"
+        // databaseConnection "usage"
+        // lib.optionalAttrs cfg.simulator.enable (databaseConnection "simulator")
       );
 
       server = lib.mapAttrs (_: lib.mkDefault) (
         {
-          "context.path" = "/client";
-          "http.enable" = true;
           "http.port" = cfg.port;
-          "session.timeout" = 30;
-          "request.content.size" = 1048576;
-          "request.max.form.keys" = 5000;
           "https.enable" = cfg.https.enable;
           "https.port" = cfg.https.port;
           "webapp.dir" = webapp;
-          "access.log" = "${logDir}/access.log";
-          "extensions.deployment.mode" = "production";
         }
         // lib.optionalAttrs (cfg.listenAddress != null) {
           "bind.interface" = cfg.listenAddress;
@@ -610,9 +535,8 @@ in
       );
 
       environment = lib.mapAttrs (_: lib.mkDefault) {
-        "paths.script" = "${share}/cloudstack-common";
+        # The module's state directory.
         "mount.parent" = mountDir;
-        "cloud-stack-components-specification" = "components.xml";
       };
     };
 
@@ -759,23 +683,24 @@ in
         CLOUDSTACK_EXTRA_CLASSPATH = "${share}/cloudstack-management/simulator/*";
       };
 
-      # Assembles the configuration directory, which goes first on the
-      # classpath, from the generated files and the credentials.
+      # Assembles the configuration directory, upstream's
+      # /etc/cloudstack/management: the files shipped in the package, with
+      # the settings and the credentials.
       preStart = ''
         set -euo pipefail
         umask 0077
 
         rm -rf ${confDir}
         mkdir ${confDir}
+        cp -r ${share}/cloudstack-management/conf/. ${confDir}/
+        chmod -R u+w ${confDir}
         ${writeDbProperties confDir}
         {
-          cat ${propertiesFormat.generate "server.properties" cfg.settings.server}
           ${lib.optionalString cfg.https.enable "property https.keystore.password https-keystore-password"}
-        } > ${confDir}/server.properties
-        cp ${propertiesFormat.generate "environment.properties" cfg.settings.environment} \
-          ${confDir}/environment.properties
+          true
+        } | withSecrets ${serverProperties} ${confDir}/server.properties
+        cp ${environmentProperties} ${confDir}/environment.properties
         cp ${cfg.logConfig} ${confDir}/log4j-cloud.xml
-        ln -s log4j-cloud.xml ${confDir}/log4j2.xml
         cp ${credentialsDir}/secret-key ${confDir}/key
 
         # Refresh the bundled sample extensions, like a package upgrade does;
@@ -906,11 +831,14 @@ in
         set -euo pipefail
         umask 0077
 
+        # Upstream's /etc/cloudstack/usage, with the management server's
+        # db.properties and key in place of the package's.
         rm -rf ${usageConfDir}
         mkdir ${usageConfDir}
+        cp -r ${cfg.usage.package}/share/cloudstack-usage/conf/. ${usageConfDir}/
+        chmod -R u+w ${usageConfDir}
         ${writeDbProperties usageConfDir}
         cp "$CREDENTIALS_DIRECTORY/secret-key" ${usageConfDir}/key
-        cp ${cfg.usage.package}/share/cloudstack-usage/conf/log4j-cloud.xml ${usageConfDir}/
       '';
 
       # The usage server needs the schema of its own version and its job

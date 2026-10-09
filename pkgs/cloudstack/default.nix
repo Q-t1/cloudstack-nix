@@ -21,6 +21,10 @@ lib.makeScope newScope (self: {
   cloudstack-agent = self.callPackage ./agent.nix { };
   cloudstack-usage = self.callPackage ./usage.nix { };
 
+  # Fails when a bump changes upstream files followed by hand, see
+  # upstream-files.nix.
+  cloudstack-upstream-files = self.callPackage ./upstream-check.nix { };
+
   # Large downloads (hundreds of MB each), only fetched when used.
   inherit (self.cloudstackSource) systemvmTemplates;
 })

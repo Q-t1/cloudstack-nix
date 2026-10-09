@@ -79,6 +79,20 @@
                         f" '{api}?command=listConfigurations&name=mount.parent&response=json&sessionkey={sessionkey}'"
                         " | jq -e '.listconfigurationsresponse.configuration[0].value == \"/var/lib/cloudstack/mnt\"'")
 
+    with subtest("the configuration and JVM options are upstream's, with the settings"):
+        conf = "/run/cloudstack-management/conf"
+        # Upstream's whole configuration directory, as /etc/cloudstack/management.
+        machine.succeed(f"test -s {conf}/java.security.ciphers -a -s {conf}/ehcache.xml -a -s {conf}/key")
+        # Upstream's entries, with the module's in their place.
+        machine.succeed(f"grep -qx 'db.cloud.validationQuery=/\\* ping \\*/ SELECT 1' {conf}/db.properties")
+        machine.succeed(f"grep -qE '^db.cloud.encryption.type ?= ?file$' {conf}/db.properties")
+        machine.succeed(f"[ $(grep -c '^db.cloud.password' {conf}/db.properties) -eq 1 ]")
+        machine.succeed(f"grep -qx 'context.path=/client' {conf}/server.properties")
+        # The options of upstream's cloudstack-management.default.
+        cmdline = machine.succeed("tr '\\0' ' ' < /proc/$(systemctl show -P MainPID cloudstack-management)/cmdline")
+        for option in ["-XX:+UseParallelGC", f"-Djava.security.properties={conf}/java.security.ciphers"]:
+            assert option in cmdline, f"{option} not in {cmdline}"
+
     with subtest("restart keeps working with the existing database"):
         machine.systemctl("restart cloudstack-management.service")
         machine.wait_until_succeeds(
