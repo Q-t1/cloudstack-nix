@@ -5,8 +5,8 @@ KVM agent, built from source with Nix and run as NixOS services.
 
 Currently packages **CloudStack 4.23.0.0**. NixOS VM tests cover the management
 server, its database setup and the web UI, deploy a zone with a VM on the
-simulator hypervisor, and deploy a zone on a KVM host with NFS storage, up to its
-system VMs. Guest VMs on KVM, live migration and the usage server are not
+simulator hypervisor, and deploy a zone on a KVM host with NFS storage, up to a
+guest VM in an isolated network. Live migration and the usage server are not
 covered yet, see [Roadmap](#roadmap).
 
 ## Outputs
@@ -25,7 +25,7 @@ covered yet, see [Roadmap](#roadmap).
 | `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management` and `cloudstack-agent` |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor |
-| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on a KVM host with NFS storage, up to its system VMs (needs nested virtualisation) |
+| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on a KVM host with NFS storage, its system VMs and a guest VM (needs nested virtualisation) |
 
 ## Usage
 
@@ -166,8 +166,13 @@ The agent then connects to the management server on port 8250.
 `tests/kvm.nix` deploys such a zone: a management server, a KVM host and an NFS
 server for primary and secondary storage, with the system VM template from
 `systemVmTemplates`. It waits for the secondary storage VM and the console proxy
-to run on the host. The KVM host is itself a VM, so the test needs nested
-virtualisation.
+to run on the host, registers a template from a URL, then deploys a VM in an
+isolated network, with its virtual router, and destroys it. The KVM host is
+itself a VM, so the test needs nested virtualisation.
+
+The secondary storage VM refuses to download templates from private addresses
+unless they are in the global setting `secstorage.allowed.internal.sites`, which
+the management server only reads when it starts.
 
 ### What the module sets up
 
@@ -189,9 +194,9 @@ virtualisation.
   ones NixOS allows by default. `/etc/libvirt/libvirtd.conf` is only a marker:
   the keystore scripts check that it exists, and otherwise wait forever for a
   system VM.
-- `br_netfilter` for security groups, NFS client support (libvirtd mounts NFS
-  storage pools itself, so `mount` is in its `PATH`), and
-  `/var/lib/libvirt/images` for host-local primary storage.
+- `br_netfilter` for security groups, `8021q` for guest VLANs, NFS client
+  support (libvirtd mounts NFS storage pools itself, so `mount` is in its
+  `PATH`), and `/var/lib/libvirt/images` for host-local primary storage.
 
 Not set up yet: live migration (libvirtd does not listen on the network) and
 UEFI guests (the agent detects UEFI support by asking `dpkg` or `rpm` whether
@@ -255,9 +260,9 @@ the code they patch.
 
 ## Roadmap
 
-- A guest VM on KVM in `tests/kvm.nix`: a guest network (virtual router) and a
-  VM from a small template, served over HTTP inside the test since the
-  secondary storage VM downloads templates from a URL.
+- Guest connectivity in `tests/kvm.nix`: its guest template is a blank disk, so
+  the VM runs but boots nothing. A small bootable image would let the test
+  check that the guest gets its address from the virtual router.
 - KVM live migration: libvirtd listening with TLS, using the certificates the
   management server installs in `/etc/cloudstack/agent`.
 - With the next Maven rebuild, Java changes for the agent:
