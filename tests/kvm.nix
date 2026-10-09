@@ -72,20 +72,37 @@
         services.cloudstack.agent.enable = true;
       };
 
-    nfs = {
-      virtualisation.diskSize = 8192;
+    nfs =
+      { pkgs, ... }:
+      {
+        # CloudStack allocates the virtual size of each disk (5 GB per system
+        # VM, from the template) against twice the size of the export.
+        virtualisation.diskSize = 16384;
 
-      services.nfs.server = {
-        enable = true;
-        createMountPoints = true;
-        exports = ''
-          /export/primary 192.168.1.0/24(rw,no_root_squash,no_subtree_check)
-          /export/secondary 192.168.1.0/24(rw,no_root_squash,no_subtree_check)
-        '';
+        services.nfs.server = {
+          enable = true;
+          createMountPoints = true;
+          exports = ''
+            /export/primary 192.168.1.0/24(rw,no_root_squash,no_subtree_check)
+            /export/secondary 192.168.1.0/24(rw,no_root_squash,no_subtree_check)
+          '';
+        };
+        # NFSv3 clients also need rpcbind and mountd, on changing ports.
+        networking.firewall.enable = false;
+
+        # A guest template, which the secondary storage VM downloads. Its disk
+        # is blank: the VM runs, but boots nothing.
+        services.nginx = {
+          enable = true;
+          virtualHosts.templates = {
+            default = true;
+            root = pkgs.runCommand "cloudstack-test-templates" { nativeBuildInputs = [ pkgs.qemu-utils ]; } ''
+              mkdir "$out"
+              qemu-img create -f qcow2 "$out/blank.qcow2" 1G
+            '';
+          };
+        };
       };
-      # NFSv3 clients also need rpcbind and mountd, on changing ports.
-      networking.firewall.enable = false;
-    };
   };
 
   testScript =
@@ -130,6 +147,13 @@
               timeout=timeout,
           )
 
+      # Unauthenticated calls get a 401 once the API is up.
+      def wait_for_api():
+          management.wait_until_succeeds(
+              f"curl -s -o /dev/null -w '%{{http_code}}' '{api}?command=listCapabilities&response=json' | grep -qx 401",
+              timeout=timedelta(minutes=30),
+          )
+
       start_all()
 
       with subtest("the KVM host waits to be added"):
@@ -144,14 +168,16 @@
 
       with subtest("the management server comes up"), logs_on_failure():
           management.wait_for_unit("cloudstack-management.service")
-          management.wait_until_succeeds(
-              f"curl -s -o /dev/null -w '%{{http_code}}' '{api}?command=listCapabilities&response=json' | grep -qx 401",
-              timeout=timedelta(minutes=30),
-          )
+          wait_for_api()
           management.succeed("cloudstack-cloudmonkey sync")
           # Agents and system VMs connect to this address. It defaults to the
           # address of the default route, the test VM's NAT interface.
           cmk("update", "configuration", name="host", value="${managementIP}")
+          # The secondary storage VM only downloads templates from private
+          # addresses in these networks, which the server reads when it starts.
+          cmk("update", "configuration", name="secstorage.allowed.internal.sites", value="192.168.1.0/24")
+          management.systemctl("restart cloudstack-management.service")
+          wait_for_api()
 
       with subtest("a KVM host is added and comes up"), logs_on_failure():
           zone = cmk(
@@ -254,5 +280,47 @@
           )
           for vm in cmk("list", "systemvms", zoneid=zone["id"])["systemvm"]:
               kvm.succeed(f"virsh domstate {vm['name']} | grep -qx running")
+
+      with subtest("a template is downloaded from a URL"), logs_on_failure():
+          ostype = cmk("list", "ostypes", description="Other Linux (64-bit)")["ostype"][0]
+          template = cmk(
+              "register", "template",
+              name="blank", displaytext="blank", url="http://${nfsIP}/blank.qcow2",
+              format="QCOW2", hypervisor="KVM", ostypeid=ostype["id"], zoneid=zone["id"],
+          )["template"][0]
+          wait_for(
+              ".template[0].isready",
+              "list", "templates", templatefilter="self", id=template["id"],
+              timeout=timedelta(minutes=15),
+          )
+
+      with subtest("a VM runs in an isolated network on the KVM host"), logs_on_failure():
+          network_offering = cmk(
+              "list", "networkofferings", name="DefaultIsolatedNetworkOfferingWithSourceNatService"
+          )["networkoffering"][0]
+          network = cmk(
+              "create", "network",
+              zoneid=zone["id"], name="guest", displaytext="guest", networkofferingid=network_offering["id"],
+          )["network"]
+          service_offering = cmk("list", "serviceofferings", name="Small Instance")["serviceoffering"][0]
+          vm = cmk(
+              "deploy", "virtualmachine",
+              zoneid=zone["id"], templateid=template["id"], serviceofferingid=service_offering["id"],
+              networkids=network["id"], name="guest",
+          )["virtualmachine"]
+          assert vm["state"] == "Running", f"unexpected VM state {vm['state']}"
+          router = cmk("list", "routers", networkid=network["id"])["router"][0]
+          assert router["state"] == "Running", f"unexpected router state {router['state']}"
+
+          kvm.succeed(f"virsh domstate {vm['instancename']} | grep -qx running")
+          kvm.succeed(f"virsh domstate {router['name']} | grep -qx running")
+          # The agent put the guest network's VLAN on the bridge's interface.
+          broadcast_uri = cmk("list", "networks", id=network["id"])["network"][0]["broadcasturi"]
+          vlan = broadcast_uri.removeprefix("vlan://")
+          kvm.succeed(f"test -d /sys/class/net/breth1-{vlan}/brif/eth1.{vlan}")
+
+      with subtest("the VM is destroyed and removed from the KVM host"), logs_on_failure():
+          cmk("destroy", "virtualmachine", id=vm["id"], expunge="true")
+          kvm.wait_until_fails(f"virsh domstate {vm['instancename']}", timeout=300)
     '';
 }

@@ -251,8 +251,12 @@ in
       ]
     );
 
-    # The bridge firewall used by security groups.
-    boot.kernelModules = [ "br_netfilter" ];
+    # The bridge firewall used by security groups, and VLAN interfaces for
+    # guest networks.
+    boot.kernelModules = [
+      "br_netfilter"
+      "8021q"
+    ];
 
     # Primary and secondary storage are usually NFS.
     boot.supportedFilesystems.nfs = true;
