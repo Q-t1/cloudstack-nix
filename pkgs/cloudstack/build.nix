@@ -1,7 +1,7 @@
 # The whole Maven reactor. This is by far the most expensive derivation (the
 # dependency FOD and the offline build each compile all ~150 modules), so it
 # only compiles and installs a staging tree of build artifacts. Packaging
-# derivations (common.nix, management.nix, agent.nix, later usage) pick from
+# derivations (common.nix, management.nix, agent.nix, usage.nix) pick from
 # that tree, which keeps layout changes from triggering a Java rebuild.
 {
   lib,

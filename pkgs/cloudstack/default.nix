@@ -19,6 +19,7 @@ lib.makeScope newScope (self: {
   cloudstack-ui = self.callPackage ./ui.nix { };
   cloudstack-management = self.callPackage ./management.nix { };
   cloudstack-agent = self.callPackage ./agent.nix { };
+  cloudstack-usage = self.callPackage ./usage.nix { };
 
   # Large downloads (hundreds of MB each), only fetched when used.
   inherit (self.cloudstackSource) systemvmTemplates;

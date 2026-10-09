@@ -14,7 +14,7 @@
     {
       overlays.default = final: _prev: {
         cloudstackPackages = final.callPackage ./pkgs/cloudstack { };
-        inherit (final.cloudstackPackages) cloudstack-management cloudstack-agent;
+        inherit (final.cloudstackPackages) cloudstack-management cloudstack-agent cloudstack-usage;
       };
 
       packages = forAllSystems (
@@ -29,6 +29,7 @@
             cloudstack-ui
             cloudstack-management
             cloudstack-agent
+            cloudstack-usage
             ;
           cloudstack-systemvm-template-kvm = cloudstack.systemvmTemplates.kvm-x86_64;
           default = cloudstack.cloudstack-management;
@@ -50,7 +51,11 @@
       };
 
       checks = forAllSystems (pkgs: {
-        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) cloudstack-management cloudstack-agent;
+        inherit (self.packages.${pkgs.stdenv.hostPlatform.system})
+          cloudstack-management
+          cloudstack-agent
+          cloudstack-usage
+          ;
         nixos-management = pkgs.testers.runNixOSTest (import ./tests/management.nix { inherit self; });
         nixos-simulator = pkgs.testers.runNixOSTest (import ./tests/simulator.nix { inherit self; });
         nixos-kvm = pkgs.testers.runNixOSTest (import ./tests/kvm.nix { inherit self; });

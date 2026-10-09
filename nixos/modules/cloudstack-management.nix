@@ -22,6 +22,8 @@ let
   logDir = "/var/log/cloudstack/management";
   confDir = "/run/cloudstack-management/conf";
   credentialsDir = "/run/credentials/cloudstack-management.service";
+  usageConfDir = "/run/cloudstack-usage/conf";
+  usageSanityCheckFile = "/usr/local/libexec/sanity-check-last-id";
 
   share = "${cfg.package}/share";
   inherit (cfg.package) jre;
@@ -146,13 +148,14 @@ let
   ++ lib.optional cfg.simulator.enable "simulator";
 
   # Shell code that sets `mysql` (the client), `password` (the database
-  # password) and defines `mysql_cloud`, a client logged in as the database
-  # user. Its option file goes into the unit's RuntimeDirectory.
-  mysqlClientSetup = ''
+  # password, read from passwordFile, a shell word) and defines `mysql_cloud`,
+  # a client logged in as the database user. Its option file goes into the
+  # unit's RuntimeDirectory.
+  mysqlClientSetup = passwordFile: ''
     # MariaDB 11 deprecates the `mysql` name; MySQL only has that one.
     mysql=$(command -v mariadb || command -v mysql)
 
-    password=$(< ${lib.escapeShellArg dbPasswordFile})
+    password=$(< ${passwordFile})
     cnf_password=$(printf '%s' "$password" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
     cat > "$RUNTIME_DIRECTORY/client.cnf" <<EOF
     [client]
@@ -165,6 +168,37 @@ let
       "$mysql" --defaults-extra-file="$RUNTIME_DIRECTORY/client.cnf" "$@"
     }
   '';
+
+  # Shell code for a unit with the database credentials (LoadCredential):
+  # defines `property KEY CREDENTIAL`, which prints a .properties entry from a
+  # credential, and writes db.properties, with the secrets, into dir.
+  writeDbProperties = dir: ''
+    # Java reads .properties files as ISO-8859-1, so secrets should be ASCII.
+    property() {
+      local value
+      value=$(< "$CREDENTIALS_DIRECTORY/$2")
+      if [[ $value == *$'\n'* ]]; then
+        echo "error: credential $2 must be a single line" >&2
+        exit 1
+      fi
+      printf '%s=%s\n' "$1" "''${value//\\/\\\\}"
+    }
+
+    {
+      cat ${propertiesFormat.generate "db.properties" cfg.settings.db}
+      property db.cloud.password db-password
+      property db.usage.password db-password
+      property db.cloud.encrypt.secret database-secret-key
+      ${lib.optionalString cfg.simulator.enable "property db.simulator.password db-password"}
+    } > ${dir}/db.properties
+  '';
+
+  # The credentials behind writeDbProperties, and the encryption key file.
+  databaseCredentials = [
+    "db-password:${dbPasswordFile}"
+    "secret-key:${secretKeyFile}"
+    "database-secret-key:${databaseSecretKeyFile}"
+  ];
 
   settingsOption =
     file: extraDescription:
@@ -398,6 +432,37 @@ in
       once the server has upgraded the schema; wait for that unit before
       adding a zone
     '';
+
+    usage = {
+      enable = lib.mkEnableOption ''
+        the usage server on this host, `cloudstack-usage.service`, which turns
+        the management server's usage events into usage records (the
+        `listUsageRecords` API). It uses the management server's database
+        settings and secrets, and starts once the server has upgraded the
+        schema. Its job runs daily by default, as set by the global settings
+        `usage.stats.job.exec.time` and `usage.stats.job.aggregation.range`,
+        which it reads when it starts
+      '';
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.cloudstack-usage or (pkgs.callPackage ../../pkgs/cloudstack { }).cloudstack-usage;
+        defaultText = lib.literalExpression "pkgs.cloudstack-usage";
+        description = "The CloudStack usage server package.";
+      };
+
+      javaOptions = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [
+          "-Xms256m"
+          "-Xmx2048m"
+        ];
+        description = ''
+          JVM options of the usage server. They are word-split, so they cannot
+          contain spaces.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -622,7 +687,7 @@ in
         ${lib.optionalString (cfg.secretKeyFile == null) "generate secret-key"}
         ${lib.optionalString (cfg.databaseSecretKeyFile == null) "generate database-secret-key"}
 
-        ${mysqlClientSetup}
+        ${mysqlClientSetup (lib.escapeShellArg dbPasswordFile)}
       ''
       + lib.optionalString cfg.database.createLocally ''
         # Replaces upstream's create-database*.sql, which drop and recreate.
@@ -700,27 +765,9 @@ in
         set -euo pipefail
         umask 0077
 
-        # A .properties entry from a credential. Java reads these files as
-        # ISO-8859-1, so secrets should be ASCII.
-        property() {
-          local value
-          value=$(< "${credentialsDir}/$2")
-          if [[ $value == *$'\n'* ]]; then
-            echo "error: credential $2 must be a single line" >&2
-            exit 1
-          fi
-          printf '%s=%s\n' "$1" "''${value//\\/\\\\}"
-        }
-
         rm -rf ${confDir}
         mkdir ${confDir}
-        {
-          cat ${propertiesFormat.generate "db.properties" cfg.settings.db}
-          property db.cloud.password db-password
-          property db.usage.password db-password
-          property db.cloud.encrypt.secret database-secret-key
-          ${lib.optionalString cfg.simulator.enable "property db.simulator.password db-password"}
-        } > ${confDir}/db.properties
+        ${writeDbProperties confDir}
         {
           cat ${propertiesFormat.generate "server.properties" cfg.settings.server}
           ${lib.optionalString cfg.https.enable "property https.keystore.password https-keystore-password"}
@@ -741,15 +788,12 @@ in
         ExecStart = lib.getExe cfg.package;
         User = "cloud";
         Group = "cloud";
-        LoadCredential = [
-          "db-password:${dbPasswordFile}"
-          "secret-key:${secretKeyFile}"
-          "database-secret-key:${databaseSecretKeyFile}"
-        ]
-        ++ lib.optionals cfg.https.enable [
-          "https-keystore:${cfg.https.keystoreFile}"
-          "https-keystore-password:${cfg.https.keystorePasswordFile}"
-        ];
+        LoadCredential =
+          databaseCredentials
+          ++ lib.optionals cfg.https.enable [
+            "https-keystore:${cfg.https.keystoreFile}"
+            "https-keystore-password:${cfg.https.keystorePasswordFile}"
+          ];
         StateDirectory = [
           "cloudstack/management"
           "cloudstack/mnt"
@@ -801,7 +845,7 @@ in
       script = ''
         set -euo pipefail
 
-        ${mysqlClientSetup}
+        ${mysqlClientSetup (lib.escapeShellArg dbPasswordFile)}
         query() {
           mysql_cloud --batch --skip-column-names -e "$1"
         }
@@ -826,6 +870,104 @@ in
           } | mysql_cloud
         fi
       '';
+    };
+
+    # The usage sanity check (global setting usage.sanity.check.interval, off
+    # by default) keeps its state at this fixed path.
+    systemd.tmpfiles.rules = lib.mkIf cfg.usage.enable [
+      "d /usr/local/libexec 0755 root root - -"
+      "f ${usageSanityCheckFile} 0644 cloud cloud - 1"
+    ];
+
+    # Upstream's package links the usage server's db.properties and key to
+    # the management server's; this one writes the same files.
+    systemd.services.cloudstack-usage = lib.mkIf cfg.usage.enable {
+      description = "Apache CloudStack usage server";
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "cloudstack-management-init.service" ];
+      after = [
+        "network-online.target"
+        "cloudstack-management-init.service"
+      ];
+      wants = [ "network-online.target" ];
+
+      path = [
+        mysqlClient
+        pkgs.coreutils
+        pkgs.gnused
+      ];
+
+      environment = {
+        CLOUDSTACK_CONF_DIR = usageConfDir;
+        JAVA_OPTS = lib.concatStringsSep " " cfg.usage.javaOptions;
+      };
+
+      preStart = ''
+        set -euo pipefail
+        umask 0077
+
+        rm -rf ${usageConfDir}
+        mkdir ${usageConfDir}
+        ${writeDbProperties usageConfDir}
+        cp "$CREDENTIALS_DIRECTORY/secret-key" ${usageConfDir}/key
+        cp ${cfg.usage.package}/share/cloudstack-usage/conf/log4j-cloud.xml ${usageConfDir}/
+      '';
+
+      # The usage server needs the schema of its own version and its job
+      # settings, which the management server creates when it starts, the
+      # settings after the schema: on a new installation, wait for both rather
+      # than fail and restart.
+      script = ''
+        set -euo pipefail
+
+        ${mysqlClientSetup ''"$CREDENTIALS_DIRECTORY/db-password"''}
+        ready() {
+          local ready
+          ready=$(mysql_cloud --batch --skip-column-names -e "
+            SELECT
+              (SELECT COUNT(*) FROM cloud.version
+                WHERE version = '${cfg.usage.package.version}' AND step = 'Complete') > 0
+              AND (SELECT COUNT(*) FROM cloud.configuration
+                WHERE name IN ('usage.stats.job.exec.time', 'usage.stats.job.aggregation.range')
+                  AND value IS NOT NULL) = 2
+          " 2>/dev/null) || return 1
+          [ "$ready" = 1 ]
+        }
+        if ! ready; then
+          echo "Waiting for the management server to upgrade the database to ${cfg.usage.package.version}"
+          until ready; do
+            sleep 10
+          done
+        fi
+
+        exec ${lib.getExe cfg.usage.package}
+      '';
+
+      serviceConfig = {
+        User = "cloud";
+        Group = "cloud";
+        LoadCredential = databaseCredentials;
+        LogsDirectory = "cloudstack/usage";
+        LogsDirectoryMode = "0750";
+        RuntimeDirectory = "cloudstack-usage";
+        RuntimeDirectoryMode = "0700";
+        UMask = "0027";
+        Restart = "always";
+        RestartSec = "10s";
+        # The JVM exits with 143 on SIGTERM.
+        SuccessExitStatus = 143;
+
+        ReadWritePaths = [ "-${usageSanityCheckFile}" ];
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ProtectControlGroups = true;
+        ProtectKernelModules = true;
+        ProtectKernelTunables = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+      };
     };
   };
 }

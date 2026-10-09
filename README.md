@@ -3,12 +3,12 @@
 The [Apache CloudStack](https://cloudstack.apache.org/) management server and
 KVM agent, built from source with Nix and run as NixOS services.
 
-Currently packages **CloudStack 4.23.0.0**. NixOS VM tests cover the management
-server, its database setup and the web UI, deploy a zone with a VM on the
-simulator hypervisor, and deploy a zone on a KVM host with NFS storage, up to a
-guest VM in an isolated network, reached through its virtual router and
-live-migrated to a second host. The usage server is not covered yet, see
-[Roadmap](#roadmap).
+Currently packages **CloudStack 4.23.0.0**, with the usage server. NixOS VM tests
+cover the management server, its database setup and the web UI; deploy a zone
+with a VM on the simulator hypervisor, which the usage server bills; and deploy a
+zone on a KVM host with NFS storage, up to a guest VM in an isolated network,
+reached through its virtual router and live-migrated to a second host. See
+[Roadmap](#roadmap) for what is not covered yet.
 
 ## Outputs
 
@@ -16,6 +16,7 @@ live-migrated to a second host. The usage server is not covered yet, see
 | --- | --- |
 | `packages.x86_64-linux.cloudstack-management` | Management server: launcher, jars, web UI, base SQL schema |
 | `packages.x86_64-linux.cloudstack-agent` | KVM agent: launcher, jars, libvirt hook, host setup script |
+| `packages.x86_64-linux.cloudstack-usage` | Usage server: launcher, jars, default configuration |
 | `packages.x86_64-linux.cloudstack-common` | Scripts and system VM patch files shared by both |
 | `packages.x86_64-linux.cloudstack-ui` | Web UI (Vue), built with `buildNpmPackage` |
 | `packages.x86_64-linux.cloudstack-build` | Maven reactor build: staging tree of the build artifacts |
@@ -23,9 +24,9 @@ live-migrated to a second host. The usage server is not covered yet, see
 | `nixosModules.cloudstack-management` | `services.cloudstack.management` |
 | `nixosModules.cloudstack-agent` | `services.cloudstack.agent`, see [KVM hosts](#kvm-hosts) |
 | `nixosModules.default` | Both modules |
-| `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management` and `cloudstack-agent` |
+| `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management`, `cloudstack-agent` and `cloudstack-usage` |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
-| `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor |
+| `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor, and the usage server's records for the VM |
 | `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and live-migrated (needs nested virtualisation) |
 
 ## Usage
@@ -89,6 +90,28 @@ server upgrades the base schema (CloudStack 4.0) to its own version.
   loads upstream's simulator templates, so wait for it before adding a zone.
   `tests/simulator.nix` deploys a whole zone.
 
+### Usage server
+
+```nix
+services.cloudstack.management.usage.enable = true;
+```
+
+runs the usage server, `cloudstack-usage.service`, on the management server's
+host, with the management server's database settings and secrets (upstream's
+package links its `db.properties` and `key` to the management server's). On a
+new installation, it waits for the management server to upgrade the schema to
+its version and to create the usage job settings, rather than fail and restart.
+It turns the usage events into usage records, which `listUsageRecords` returns.
+Upstream runs it as root; here it runs as `cloud`.
+
+Its job runs once a day by default, for the day before: see the global settings
+`usage.stats.job.exec.time` and `usage.stats.job.aggregation.range` (in
+minutes), which the usage server reads when it starts, so restart it after
+changing them. `generateUsageRecords` runs a job right away. The usage sanity
+check (`usage.sanity.check.interval`, off by default) keeps its state in
+`/usr/local/libexec/sanity-check-last-id`, a path fixed in the Java code, which
+the module creates.
+
 ### Exploring a simulated zone
 
 To browse the zone that the simulator test deploys, run the test's interactive
@@ -115,6 +138,8 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 | `/var/lib/cloudstack/mnt` | Secondary storage mount points |
 | `/var/log/cloudstack/management` | `management-server.log`, `apilog.log`, `access.log` |
 | `/run/cloudstack-management/conf` | Generated configuration, secrets included |
+| `/var/log/cloudstack/usage` | `usage.log`, with `usage.enable` |
+| `/run/cloudstack-usage/conf` | The usage server's generated configuration, secrets included |
 
 ## KVM hosts
 
@@ -257,8 +282,8 @@ secured hosts), and UEFI guests (the agent detects UEFI support by asking
 The Java build is heavy: `buildMavenPackage` compiles the whole reactor twice,
 once to fetch dependencies (fixed-output) and once offline. Each pass takes
 about 25 minutes on one core. Packaging lives in separate, cheap derivations
-(`common.nix`, `management.nix`, `agent.nix`, `ui.nix`), so layout changes do
-not rebuild Java.
+(`common.nix`, `management.nix`, `agent.nix`, `usage.nix`, `ui.nix`), so layout
+changes do not rebuild Java.
 
 To bump CloudStack:
 
@@ -278,11 +303,13 @@ the code they patch.
 
 ## Roadmap
 
-- With the next Maven rebuild, Java changes for the agent:
-  - detect UEFI support from the firmware files rather than from `dpkg`/`rpm`;
-  - resolve `/bin/systemctl` (rolling maintenance), `/usr/sbin/lvs` and
+- With the next Maven rebuild, Java changes:
+  - agent: detect UEFI support from the firmware files rather than from
+    `dpkg`/`rpm`;
+  - agent: resolve `/bin/systemctl` (rolling maintenance), `/usr/sbin/lvs` and
     `/usr/sbin/lvchange` (CLVM) and `/bin/test` (multipath) from `PATH`;
-  - require the agent artifacts in `build.nix`, which only keeps them if
-    present.
-- Usage server. Its artifacts are already in `cloudstack-build`.
+  - usage server: take the sanity check's state file from a setting rather
+    than `/usr/local/libexec`;
+  - require the agent and usage server artifacts in `build.nix`, which only
+    keeps them if present.
 - CI with a binary cache, so nobody rebuilds the Maven reactor locally.
