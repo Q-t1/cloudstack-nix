@@ -9,7 +9,8 @@
 # Upstream's script also rewrites the network, libvirt, firewall and
 # AppArmor/SELinux configuration of the host. On NixOS those come from the
 # system configuration, so this one only records where the host belongs in
-# agent.properties, like upstream's last step, then restarts the agent.
+# agent.properties, like upstream's last step, then restarts the agent. With
+# -s alone, as keystore-cert-import runs it, it has libvirtd listen with TLS.
 #
 # Environment:
 #   CLOUDSTACK_CONF_DIR  directory holding agent.properties, as for
@@ -63,8 +64,14 @@ done
 
 if [ "$auto" -eq 0 ]; then
   if [ "$secure" -eq 1 ]; then
-    # Upstream configures libvirtd for TLS here.
-    echo "libvirtd is configured by NixOS, nothing to do."
+    # keystore-cert-import runs this once it has installed the host's
+    # certificate, and upstream configures libvirtd for TLS here. The NixOS
+    # module does, with a TLS socket that waits for the certificate: start it,
+    # and restart libvirtd to pass it the socket and load the certificate.
+    # Running VMs are left alone.
+    systemctl start libvirtd-tls.socket
+    systemctl restart libvirtd.service
+    echo "Libvirtd with TLS started"
     exit 0
   fi
   echo "Only the non-interactive mode (-a), used by the management server, is supported." >&2

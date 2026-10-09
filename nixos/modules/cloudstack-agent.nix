@@ -18,6 +18,9 @@ let
   commonLink = "/usr/share/cloudstack-common";
   logDir = "/var/log/cloudstack/agent";
   tmpDir = "${stateDir}/tmp";
+  # libvirt's PKI directory: under its sysconfdir, which is /var/lib on NixOS,
+  # not /etc as keystore-cert-import expects.
+  pkiDir = "/var/lib/pki";
 
   share = "${cfg.package}/share";
 
@@ -177,7 +180,8 @@ in
       default = false;
       description = ''
         Open the VNC ports of the VMs (5900-6100), which the console proxy
-        connects to.
+        connects to, and the ports for live migration: libvirtd's TLS port
+        (16514) and QEMU's migration ports (49152-49215).
       '';
     };
   };
@@ -261,12 +265,29 @@ in
     # Primary and secondary storage are usually NFS.
     boot.supportedFilesystems.nfs = true;
 
-    networking.firewall.allowedTCPPortRanges = lib.mkIf cfg.openFirewall [
-      {
-        from = 5900;
-        to = 6100;
-      }
-    ];
+    networking.firewall = lib.mkIf cfg.openFirewall {
+      allowedTCPPorts = [ 16514 ];
+      allowedTCPPortRanges = [
+        {
+          from = 5900;
+          to = 6100;
+        }
+        {
+          from = 49152;
+          to = 49215;
+        }
+      ];
+    };
+
+    # libvirtd's TLS socket, for live migration: the agent connects to the
+    # destination's libvirtd with qemu+tls once the host is secured. libvirtd
+    # cannot start without its certificate, so the socket waits for the one
+    # that the management server issues when it adds the host; then
+    # keystore-cert-import runs `cloudstack-setup-agent -s`, which starts it.
+    systemd.sockets.libvirtd-tls = {
+      wantedBy = [ "sockets.target" ];
+      unitConfig.ConditionPathExists = "${stateDir}/cloud.crt";
+    };
 
     # cloudstack-setup-agent, which the management server runs over SSH, and
     # upstream's helpers.
@@ -285,6 +306,14 @@ in
       "L+ /usr/share/cloudstack-agent/tmp - - - - ${tmpDir}"
       # The default local.storage.path, for host-local primary storage.
       "d /var/lib/libvirt/images 0711 root root - -"
+      # The host's certificate, for libvirtd's TLS socket and for the
+      # agent's connections to other hosts' libvirtd.
+      "d ${pkiDir}/libvirt/private 0700 root root - -"
+      "L+ ${pkiDir}/CA/cacert.pem - - - - ${stateDir}/cloud.ca.crt"
+      "L+ ${pkiDir}/libvirt/servercert.pem - - - - ${stateDir}/cloud.crt"
+      "L+ ${pkiDir}/libvirt/clientcert.pem - - - - ${stateDir}/cloud.crt"
+      "L+ ${pkiDir}/libvirt/private/serverkey.pem - - - - ${stateDir}/cloud.key"
+      "L+ ${pkiDir}/libvirt/private/clientkey.pem - - - - ${stateDir}/cloud.key"
     ];
 
     systemd.services.cloudstack-agent = {

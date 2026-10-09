@@ -2,9 +2,50 @@
 # up over SSH (certificates, then cloudstack-setup-agent) and the agent
 # connects back; with NFS primary and secondary storage, the zone then starts
 # its system VMs on the host, and a guest VM in an isolated network, which is
-# reached through its virtual router. The KVM host is itself a VM, so this
-# needs nested virtualisation on the machine running the test.
+# reached through its virtual router, then live-migrated to a second host. The
+# KVM hosts are themselves VMs, so this needs nested virtualisation on the
+# machine running the test.
 { self }:
+let
+  kvmHost =
+    { config, lib, ... }:
+    {
+      imports = [ self.nixosModules.cloudstack-agent ];
+
+      virtualisation.diskSize = 4096;
+
+      # The test network goes into the bridge that the zone's traffic labels
+      # name, and the host address with it.
+      networking.bridges.cloudbr0.interfaces = [ "eth1" ];
+      networking.interfaces.eth1 = {
+        ipv4.addresses = lib.mkForce [ ];
+        ipv6.addresses = lib.mkForce [ ];
+      };
+      networking.interfaces.cloudbr0.ipv4.addresses = [
+        {
+          address = config.networking.primaryIPAddress;
+          prefixLength = 24;
+        }
+      ];
+
+      # The management server logs in as root with a password.
+      services.openssh = {
+        enable = true;
+        settings.PermitRootLogin = "yes";
+      };
+      users.users.root = {
+        # The test framework's empty password would take precedence.
+        hashedPasswordFile = lib.mkForce null;
+        password = "password";
+      };
+
+      services.cloudstack.agent = {
+        enable = true;
+        # Live migration between the hosts.
+        openFirewall = true;
+      };
+    };
+in
 {
   name = "cloudstack-kvm";
 
@@ -32,46 +73,25 @@
         environment.systemPackages = [ pkgs.jq ];
       };
 
-    kvm =
-      { config, lib, ... }:
-      {
-        imports = [ self.nixosModules.cloudstack-agent ];
-
-        # Room for the system VMs: the secondary storage VM and the console
-        # proxy take 1.5 GB.
-        virtualisation = {
-          cores = 4;
-          memorySize = 6144;
-          diskSize = 4096;
-        };
-
-        # The test network goes into the bridge that the zone's traffic
-        # labels name, and the host address with it.
-        networking.bridges.cloudbr0.interfaces = [ "eth1" ];
-        networking.interfaces.eth1 = {
-          ipv4.addresses = lib.mkForce [ ];
-          ipv6.addresses = lib.mkForce [ ];
-        };
-        networking.interfaces.cloudbr0.ipv4.addresses = [
-          {
-            address = config.networking.primaryIPAddress;
-            prefixLength = 24;
-          }
-        ];
-
-        # The management server logs in as root with a password.
-        services.openssh = {
-          enable = true;
-          settings.PermitRootLogin = "yes";
-        };
-        users.users.root = {
-          # The test framework's empty password would take precedence.
-          hashedPasswordFile = lib.mkForce null;
-          password = "password";
-        };
-
-        services.cloudstack.agent.enable = true;
+    kvm = {
+      imports = [ kvmHost ];
+      # Room for the system VMs: the secondary storage VM and the console
+      # proxy take 1.5 GB.
+      virtualisation = {
+        cores = 4;
+        memorySize = 6144;
       };
+    };
+
+    # Added once the zone runs, so that it only gets the guest VM, by live
+    # migration.
+    kvm2 = {
+      imports = [ kvmHost ];
+      virtualisation = {
+        cores = 2;
+        memorySize = 3072;
+      };
+    };
 
     # Also the public network's gateway, for the guest network's traffic in
     # and out.
@@ -125,6 +145,7 @@
     let
       managementIP = nodes.management.networking.primaryIPAddress;
       kvmIP = nodes.kvm.networking.primaryIPAddress;
+      kvm2IP = nodes.kvm2.networking.primaryIPAddress;
       nfsIP = nodes.nfs.networking.primaryIPAddress;
     in
     ''
@@ -135,15 +156,34 @@
 
       api = "http://localhost:8080/client/api"
 
+      # Into a system VM or virtual router from its host, as the agent does:
+      # over its link-local address, with the key that the management server
+      # sent to the host.
+      def system_vm_ssh(linklocalip):
+          return shlex.join([
+              "ssh", "-i", "/root/.ssh/id_rsa.cloud", "-p", "3922",
+              "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
+              f"root@{linklocalip}",
+          ])
+
       @contextmanager
       def logs_on_failure():
           try:
               yield
           except Exception:
               print(management.execute("tail -n 300 /var/log/cloudstack/management/management-server.log")[1])
-              print(kvm.execute("tail -n 200 /var/log/cloudstack/agent/agent.log")[1])
-              print(kvm.execute("journalctl -n 100 --no-pager -u cloudstack-agent -u sshd -u libvirtd")[1])
-              print(kvm.execute("virsh list --all; ip -br address")[1])
+              for host in [kvm, kvm2]:
+                  print(f"--- {host.name}")
+                  print(host.execute("tail -n 200 /var/log/cloudstack/agent/agent.log")[1])
+                  print(host.execute("journalctl -n 100 --no-pager -u cloudstack-agent -u sshd -u libvirtd")[1])
+                  print(host.execute("virsh list --all; ip -br address")[1])
+              # The system VMs' agents, which run on the first host.
+              status, output = management.execute(cmk_command("list", "systemvms"))
+              for systemvm in json.loads(output).get("systemvm", []) if status == 0 and output.strip() else []:
+                  if systemvm.get("linklocalip"):
+                      print(f"--- {systemvm['name']}")
+                      print(kvm.execute(f"{system_vm_ssh(systemvm['linklocalip'])} tail -n 100 /var/log/cloud.log")[1])
               raise
 
       # CloudMonkey's defaults (admin/password on localhost:8080) match the
@@ -180,6 +220,8 @@
           # Skipped by its condition, not restarted over and over.
           kvm.succeed("systemctl show -P ActiveState cloudstack-agent | grep -qx inactive")
           kvm.succeed("systemctl show -P NRestarts cloudstack-agent | grep -qx 0")
+          # Without the host's certificate, libvirtd does not listen with TLS.
+          kvm.succeed("systemctl show -P ActiveState libvirtd-tls.socket | grep -qx inactive")
 
       with subtest("the management server comes up"), logs_on_failure():
           management.wait_for_unit("cloudstack-management.service")
@@ -246,6 +288,9 @@
           kvm.succeed("grep -q '^host=${managementIP}' /etc/cloudstack/agent/agent.properties")
           kvm.succeed("grep -q '^keystore.passphrase=.' /etc/cloudstack/agent/agent.properties")
           kvm.succeed("test -s /etc/cloudstack/agent/cloud.jks -a -s /etc/cloudstack/agent/cloud.crt")
+          # libvirtd listens with TLS, with the host's certificate, which the
+          # client side presents too: the agent's check for a secured host.
+          kvm.succeed("virsh -c qemu+tls://${kvmIP}/system uri")
           host = cmk("list", "hosts", type="Routing", zoneid=zone["id"])["host"][0]
           assert host["hypervisor"] == "KVM", f"unexpected hypervisor {host['hypervisor']}"
           assert host["ipaddress"] == "${kvmIP}", f"unexpected host address {host['ipaddress']}"
@@ -338,13 +383,7 @@
 
       with subtest("the VM gets its address from the virtual router"), logs_on_failure():
           nic = vm["nic"][0]
-          # How the agent configures the router: over its link-local address,
-          # with the key that the management server sent to the host.
-          router_ssh = shlex.join([
-              "ssh", "-i", "/root/.ssh/id_rsa.cloud", "-p", "3922",
-              "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-              f"root@{router['linklocalip']}",
-          ])
+          router_ssh = system_vm_ssh(router["linklocalip"])
           kvm.wait_until_succeeds(
               f"{router_ssh} grep -q 'DHCPACK.* {nic['ipaddress']} {nic['macaddress']}' /var/log/dnsmasq.log",
               timeout=300,
@@ -382,8 +421,33 @@
           nfs.succeed(fetch)
           nfs.succeed(f"grep -q '^{public_ip['ipaddress']} .*\"HEAD /macchinina-kvm.qcow2.bz2 ' /var/log/nginx/access.log")
 
+      with subtest("a second KVM host is added to the cluster"), logs_on_failure():
+          cmk(
+              "add", "host",
+              zoneid=zone["id"], podid=pod["id"], clusterid=cluster["id"], hypervisor="KVM",
+              url="http://${kvm2IP}", username="root", password="password",
+          )
+          wait_for('.count == 2 and all(.host[]; .state == "Up")', "list", "hosts", type="Routing", zoneid=zone["id"])
+          host2 = next(
+              h for h in cmk("list", "hosts", type="Routing", zoneid=zone["id"])["host"]
+              if h["ipaddress"] == "${kvm2IP}"
+          )
+          # Each host's libvirt client gets through to the other's libvirtd.
+          kvm.succeed("virsh -c qemu+tls://${kvm2IP}/system uri")
+          kvm2.succeed("virsh -c qemu+tls://${kvmIP}/system uri")
+
+      with subtest("the VM is live-migrated to the second host"), logs_on_failure():
+          boot_id = nfs.succeed(f"{guest_ssh} cat /proc/sys/kernel/random/boot_id")
+          migrated = cmk("migrate", "virtualmachine", virtualmachineid=vm["id"], hostid=host2["id"])["virtualmachine"]
+          assert migrated["hostid"] == host2["id"], f"the VM is on host {migrated['hostid']}"
+          kvm2.succeed(f"virsh domstate {vm['instancename']} | grep -qx running")
+          kvm.fail(f"virsh domstate {vm['instancename']}")
+          # Still reachable, through its router on the first host, and still
+          # running the same boot.
+          assert nfs.succeed(f"{guest_ssh} cat /proc/sys/kernel/random/boot_id") == boot_id, "the VM restarted"
+
       with subtest("the VM is destroyed and removed from the KVM host"), logs_on_failure():
           cmk("destroy", "virtualmachine", id=vm["id"], expunge="true")
-          kvm.wait_until_fails(f"virsh domstate {vm['instancename']}", timeout=300)
+          kvm2.wait_until_fails(f"virsh domstate {vm['instancename']}", timeout=300)
     '';
 }
