@@ -25,6 +25,7 @@ reached through its virtual router and live-migrated to a second host. See
 | `nixosModules.cloudstack-agent` | `services.cloudstack.agent`, see [KVM hosts](#kvm-hosts) |
 | `nixosModules.default` | Both modules |
 | `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management`, `cloudstack-agent` and `cloudstack-usage` |
+| `checks.x86_64-linux.upstream-files` | Fails when a CloudStack bump changes upstream files that the flake follows by hand, see [Following upstream](#following-upstream) |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor, and the usage server's records for the VM |
 | `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and live-migrated (needs nested virtualisation) |
@@ -65,10 +66,16 @@ server upgrades the base schema (CloudStack 4.0) to its own version.
   recommended by the installation guide, the `cloud` and `cloud_usage`
   databases and the database user. The base schema is loaded once, into an
   empty database. This replaces `cloudstack-setup-databases`.
-- `db.properties`, `server.properties` and `environment.properties`, generated
-  from `settings.db`, `settings.server` and `settings.environment` (defaults
-  follow upstream). At each start they are assembled with the secrets into
-  `/run/cloudstack-management/conf`, which goes first on the classpath.
+- `db.properties`, `server.properties` and `environment.properties`: upstream's,
+  with the entries of `settings.db`, `settings.server` and
+  `settings.environment` in place of upstream's with the same keys. The
+  defaults set what `cloudstack-setup-databases` would (node address, database
+  connection, encryption) and what the module's options decide (ports, web UI,
+  mount point). At each start, `/run/cloudstack-management/conf`, which stands
+  for `/etc/cloudstack/management`, is assembled from the package's
+  configuration files, these and the secrets.
+- The JVM options of upstream's `cloudstack-management.default`, which
+  `javaOptions` adds to.
 - Secrets passed as systemd credentials: database password, management server
   key and database encryption key. Missing ones are generated in
   `/var/lib/cloudstack/secrets`.
@@ -217,7 +224,11 @@ the management server only reads when it starts.
   restarted every few seconds. The agent keeps state in `agent.properties`, so
   the file is kept: it starts as upstream's default, and at each start the
   entries of `settings.agent` replace the ones with the same keys.
-  `uefi.properties` points at the UEFI firmware of libvirtd's QEMU.
+  `environment.properties` and `uefi.properties` are upstream's, with the
+  entries of `settings.environment` and `settings.uefi` in place: the scripts
+  that the management server runs, and the UEFI firmware of libvirtd's QEMU.
+  The JVM options are upstream's (`cloudstack-agent.default`), which
+  `javaOptions` adds to.
 - What the management server's SSH setup expects: `/usr/share/cloudstack-common`
   (with the keystore scripts wrapped so that they find `keytool` and the other
   tools they need), a writable `/etc/cloudstack/agent`, `cloudstack-setup-agent`
@@ -253,11 +264,58 @@ secured hosts), and UEFI guests (the agent detects UEFI support by asking
 | `/usr/share/cloudstack-common` | Scripts and system VM patch files, at the path the management server uses |
 | `/var/lib/pki` | libvirt's CA, certificates and keys: links to the host's certificate in `/var/lib/cloudstack/agent` |
 
+## Following upstream
+
+The packages and modules stay as close to upstream's packages as NixOS
+allows, so that a CloudStack bump brings upstream's changes along, or fails
+where it cannot:
+
+- The launchers run what upstream's systemd units run: the JVM options,
+  classpath and main class of `packaging/systemd/*.default`, mapped to the
+  packages' paths. A classpath entry or `/etc`/`/usr` path that the build does
+  not know how to map fails it. `javaOptions` only adds to upstream's options.
+- The configuration files are upstream's, as shipped in the packages, with
+  only what upstream's setup tools would change in them
+  (`cloudstack-setup-databases`, `cloudstack-setup-agent`) and what the
+  modules' options decide, from the `settings.*` options. Upstream's other
+  entries, and new ones in later versions, come through as they are.
+- Source and script patches use `substituteInPlace --replace-fail`, which
+  fails the build if upstream moves the code they patch.
+- What the flake still follows by hand is pinned by hash in
+  `pkgs/cloudstack/upstream-files.nix`: upstream's setup tools, systemd units,
+  Debian packaging and keystore scripts. The cheap check
+  `checks.x86_64-linux.upstream-files` (it only needs the source) fails when a
+  bump changes one of them, and says what to review. It also compares the sudo
+  commands of `cloudstack-sudoers.in` with `pkgs/cloudstack/sudo-commands.nix`,
+  and the system VM template version of `pom.xml` with `source.nix`.
+
 ## Differences from the upstream packages
 
-- There is no `/etc/cloudstack/management`. Tools that edit it
+On purpose, because NixOS manages the system declaratively:
+
+- There is no `/etc/cloudstack/management` or `/etc/cloudstack/usage`. Their
+  contents are assembled at each start in `/run/cloudstack-management/conf` and
+  `/run/cloudstack-usage/conf`, from the package's files, the `settings.*`
+  options and systemd credentials. The tools that edit them
   (`cloudstack-setup-databases`, `-setup-management`, `-setup-encryption`,
-  `-migrate-databases`) are not shipped; the module covers what they do.
+  `-migrate-databases`) are not shipped; the module does what they do. Unlike
+  `cloudstack-setup-databases`, it never drops a database, and it keeps the
+  database passwords and secret in plain text in that private directory rather
+  than encrypted with the key (`ENC(...)`).
+- `cloudstack-setup-agent` is a NixOS replacement, see [KVM hosts](#kvm-hosts):
+  network, libvirt and firewall settings come from the NixOS configuration.
+  With `-s` it starts libvirtd's TLS socket rather than rewriting
+  `libvirtd.conf`. `cloudstack-agent-upgrade`, which renames bridges after an
+  upgrade from CloudStack 4.0, is not shipped.
+- systemd units: the agent is skipped until the host is added, rather than
+  restarted every 10 s; the usage server runs as `cloud` in a sandbox rather
+  than as root, and waits for the management server to set up the database.
+- NixOS paths: the agent's UEFI firmware (QEMU's), libvirt's PKI files in
+  `/var/lib/pki`, the links and markers the management server's host setup
+  expects (`/usr/share/cloudstack-common`, `/etc/libvirt/libvirtd.conf`), and
+  `/usr/local/libexec/sanity-check-last-id` for the usage server.
+- The MySQL settings come from the installation guide, which is not in the
+  source tree, so `checks.upstream-files` cannot follow them.
 - Source changes, all in `pkgs/cloudstack/build.nix`:
   - `"/bin/bash"` becomes `"bash"`, resolved from `PATH`. Not a store path:
     the same jars run inside the Debian system VMs.
@@ -271,11 +329,20 @@ secured hosts), and UEFI guests (the agent detects UEFI support by asking
   than store paths, because some scripts are copied to XenServer/OVM3 hosts.
 - `scripts/vm/systemvm/id_rsa.cloud`, a publicly known placeholder key
   upstream, links to the key the management server generates.
-- `cloudstack-setup-agent` is a NixOS replacement, see [KVM hosts](#kvm-hosts).
-  `cloudstack-agent-upgrade`, which renames bridges after an upgrade from
-  CloudStack 4.0, is not shipped.
 - The UI uses a regenerated `package-lock.json`: upstream's is out of sync with
   `package.json` (axios), so it cannot be installed offline.
+
+### Upgrades
+
+A new CloudStack version upgrades the database schema itself when its
+management server starts, as with upstream's packages; agents and the usage
+server follow. The system VM templates of the new version must be available:
+update `systemVmTemplates`, or let the management server download them.
+
+A NixOS rollback does not undo a schema upgrade, and an older management
+server does not start on a newer schema. Back up the `cloud` and `cloud_usage`
+databases before switching to a new CloudStack version, and restore them to
+roll back.
 
 ## Building and updating
 
@@ -292,14 +359,17 @@ To bump CloudStack:
    `project.systemvm.template.version` in upstream's `pom.xml`). If the
    template version changed, update `systemvmTemplates` too: the URLs, and the
    checksums from that file.
-2. Set `mvnHash = lib.fakeHash;` in `build.nix`, run
+2. Run `nix build -L .#checks.x86_64-linux.upstream-files`, which only needs the
+   source. It lists the upstream files followed by hand that changed, with what
+   to review in this flake; after the review, update their hashes and
+   `reviewed` in `pkgs/cloudstack/upstream-files.nix`.
+3. Set `mvnHash = lib.fakeHash;` in `build.nix`, run
    `nix build .#cloudstack-build.fetchedMavenDeps`, and copy the reported hash.
-3. Run `pkgs/cloudstack/update-ui-lockfile.sh`, set `npmDepsHash =
+4. Run `pkgs/cloudstack/update-ui-lockfile.sh`, set `npmDepsHash =
    lib.fakeHash;` in `ui.nix`, build `.#cloudstack-ui.npmDeps` and copy the hash.
-4. Run `nix flake check -L`, which also runs the VM tests.
-
-The `substituteInPlace --replace-fail` patches fail the build if upstream moves
-the code they patch.
+5. Run `nix flake check -L`, which also runs the VM tests. The packages fail to
+   build where upstream moved what they patch or map, see
+   [Following upstream](#following-upstream).
 
 ## Roadmap
 

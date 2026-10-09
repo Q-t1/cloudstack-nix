@@ -91,11 +91,27 @@ stdenvNoCC.mkDerivation {
     install -Dm644 tools/whisker/LICENSE tools/whisker/NOTICE \
       -t "$out/share/doc/cloudstack-management"
 
+    # The launcher runs what upstream's systemd unit runs, from its
+    # environment file, with this package's paths.
+    source ${./upstream-default.sh}
+    readUpstreamDefault packaging/systemd/cloudstack-management.default BOOTSTRAP_CLASS
+    javaOpts=$(mapUpstreamOptions "$upstreamJavaOpts" \
+      '/etc/cloudstack/management/=$conf_dir/')
+    classpath=$(mapUpstreamClasspath "$upstreamClasspath" \
+      "/usr/share/cloudstack-management/lib/*=$mgmt/lib/*" \
+      '/etc/cloudstack/management=$conf_dir' \
+      "/usr/share/cloudstack-common=$out/share/cloudstack-common" \
+      "/usr/share/cloudstack-management/setup=$mgmt/setup" \
+      "/usr/share/cloudstack-management=$mgmt" \
+      "/usr/share/cloudstack-mysql-ha/lib/*=")
     mkdir -p "$out/bin"
     substitute ${./cloudstack-management.sh} "$out/bin/cloudstack-management" \
       --subst-var-by shell ${runtimeShell} \
       --subst-var-by jre ${jre} \
-      --subst-var out
+      --subst-var out \
+      --subst-var-by upstreamJavaOpts "$javaOpts" \
+      --subst-var-by upstreamClasspath "$classpath" \
+      --subst-var-by upstreamMainClass "$upstreamMainClass"
     chmod +x "$out/bin/cloudstack-management"
 
     runHook postInstall

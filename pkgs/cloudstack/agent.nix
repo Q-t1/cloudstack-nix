@@ -77,12 +77,26 @@ stdenvNoCC.mkDerivation {
 
     ln -s ${common} "$out/share/cloudstack-common"
 
+    # The launcher runs what upstream's systemd unit runs, from its
+    # environment file, with this package's paths. Plugins go in
+    # CLOUDSTACK_EXTRA_CLASSPATH.
+    source ${./upstream-default.sh}
+    readUpstreamDefault packaging/systemd/cloudstack-agent.default JAVA_CLASS
+    javaOpts=$(mapUpstreamOptions "$upstreamJavaOpts" \
+      /usr/share/cloudstack-agent/tmp=/usr/share/cloudstack-agent/tmp)
+    classpath=$(mapUpstreamClasspath "$upstreamClasspath" \
+      "/usr/share/cloudstack-agent/lib/*=$agent/lib/*" \
+      "/usr/share/cloudstack-agent/plugins/*=" \
+      '/etc/cloudstack/agent=$conf_dir' \
+      "/usr/share/cloudstack-common/scripts=$out/share/cloudstack-common/scripts")
     mkdir -p "$out/bin"
     substitute ${./cloudstack-agent.sh} "$out/bin/cloudstack-agent" \
       --subst-var-by shell ${runtimeShell} \
       --subst-var-by jre ${jre} \
       --subst-var-by libvirt ${lib.getLib libvirt} \
-      --subst-var out
+      --subst-var-by upstreamJavaOpts "$javaOpts" \
+      --subst-var-by upstreamClasspath "$classpath" \
+      --subst-var-by upstreamMainClass "$upstreamMainClass"
     substitute ${./cloudstack-setup-agent.sh} "$out/bin/cloudstack-setup-agent" \
       --subst-var-by shell ${runtimeShell} \
       --subst-var-by path ${

@@ -56,6 +56,8 @@
           cloudstack-agent
           cloudstack-usage
           ;
+        # Cheap: only needs the source. See pkgs/cloudstack/upstream-files.nix.
+        upstream-files = (pkgs.callPackage ./pkgs/cloudstack { }).cloudstack-upstream-files;
         nixos-management = pkgs.testers.runNixOSTest (import ./tests/management.nix { inherit self; });
         nixos-simulator = pkgs.testers.runNixOSTest (import ./tests/simulator.nix { inherit self; });
         nixos-kvm = pkgs.testers.runNixOSTest (import ./tests/kvm.nix { inherit self; });
