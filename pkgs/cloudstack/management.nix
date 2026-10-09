@@ -3,7 +3,7 @@
 #
 #   bin/cloudstack-management       launcher, see cloudstack-management.sh
 #   share/cloudstack-management/    jars, webapp, base SQL schema, defaults
-#   share/cloudstack-common/        scripts and system VM patch files
+#   share/cloudstack-common/        link to the cloudstack-common package
 #
 # This derivation is cheap: changing it does not rebuild the Java code.
 {
@@ -13,6 +13,7 @@
   jre,
   cloudstackSource,
   cloudstack-build,
+  cloudstack-common,
   cloudstack-ui,
 }:
 
@@ -31,8 +32,7 @@ stdenvNoCC.mkDerivation {
 
     build=${cloudstack-build}
     mgmt=$out/share/cloudstack-management
-    common=$out/share/cloudstack-common
-    mkdir -p "$mgmt" "$common"
+    mkdir -p "$mgmt"
 
     # The shaded client jar, plus the jars upstream keeps out of it.
     install -Dm644 "$build/client/target/cloud-client-ui-${version}.jar" \
@@ -73,35 +73,20 @@ stdenvNoCC.mkDerivation {
     substituteInPlace "$mgmt/conf/server.properties" \
       --replace-fail /usr/share/cloudstack-management "$mgmt"
     substituteInPlace "$mgmt/conf/environment.properties" \
-      --replace-fail /usr/share/cloudstack-common "$common"
+      --replace-fail /usr/share/cloudstack-common "$out/share/cloudstack-common"
     # The config means to send warnings to a local syslog over UDP, but Log4j 2
     # defaults to TCP port 4560: every warning then logs an appender error.
     substituteInPlace "$mgmt/conf/log4j-cloud.xml" \
       --replace-fail '<Syslog name="SYSLOG" host="localhost" facility="LOCAL6">' \
                      '<Syslog name="SYSLOG" host="localhost" port="514" protocol="UDP" facility="LOCAL6">'
 
-    # Shared scripts and system VM patch files ("cloudstack-common").
-    cp -r scripts "$common/scripts"
-    cp -r "$build/systemvm/dist" "$common/vms"
-    install -Dm644 "$build"/client/target/pythonlibs/jasypt-*.jar -t "$common/lib"
-    install -Dm644 "$build/utils/target/cloud-utils-${version}-bundled.jar" \
-      "$common/lib/cloudstack-utils.jar"
-    substituteInPlace "$common/scripts/storage/secondary/cloud-install-sys-tmplt" \
-      --replace-fail /usr/share/cloudstack-common "$common"
+    # Scripts and system VM patch files, where the launcher and
+    # environment.properties (paths.script) expect them.
+    ln -s ${cloudstack-common}/share/cloudstack-common "$out/share/cloudstack-common"
 
-    # Resolve interpreters from PATH instead of FHS paths. Not store paths:
-    # some scripts are copied to XenServer/OVM3 hosts, and on NixOS the
-    # service PATH decides which tools they get.
-    find "$common/scripts" "$mgmt/extensions" -type f -exec sed -i -E \
+    # Interpreters come from PATH, as for the scripts in cloudstack-common.
+    find "$mgmt/extensions" -type f -exec sed -i -E \
       '1s@^#![[:space:]]*/(usr/)?bin/(bash|python3)[[:space:]]*$@#!/usr/bin/env \2@' {} +
-
-    # injectkeys.sh copies the system VM private key over this file (upstream
-    # ships a publicly known placeholder key there), and the Hyper-V and
-    # baremetal code reads it back. Point it at the key the management server
-    # keeps in its home directory instead: injectkeys.sh then finds identical
-    # files and has nothing to write into the store.
-    ln -sf /var/lib/cloudstack/management/.ssh/id_rsa \
-      "$common/scripts/vm/systemvm/id_rsa.cloud"
 
     install -Dm644 tools/whisker/LICENSE tools/whisker/NOTICE \
       -t "$out/share/doc/cloudstack-management"
@@ -119,11 +104,14 @@ stdenvNoCC.mkDerivation {
   # Script shebangs are handled above and must not become store paths.
   dontPatchShebangs = true;
   dontStrip = true;
-  # id_rsa.cloud points into /var/lib.
-  dontCheckForBrokenSymlinks = true;
 
   passthru = {
-    inherit jre cloudstack-build cloudstack-ui;
+    inherit
+      jre
+      cloudstack-build
+      cloudstack-common
+      cloudstack-ui
+      ;
   };
 
   meta = {

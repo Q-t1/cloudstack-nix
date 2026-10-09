@@ -1,5 +1,5 @@
 {
-  description = "Apache CloudStack management server for NixOS";
+  description = "Apache CloudStack management server and KVM agent for NixOS";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -14,7 +14,7 @@
     {
       overlays.default = final: _prev: {
         cloudstackPackages = final.callPackage ./pkgs/cloudstack { };
-        inherit (final.cloudstackPackages) cloudstack-management;
+        inherit (final.cloudstackPackages) cloudstack-management cloudstack-agent;
       };
 
       packages = forAllSystems (
@@ -23,7 +23,13 @@
           cloudstack = pkgs.callPackage ./pkgs/cloudstack { };
         in
         {
-          inherit (cloudstack) cloudstack-build cloudstack-ui cloudstack-management;
+          inherit (cloudstack)
+            cloudstack-build
+            cloudstack-common
+            cloudstack-ui
+            cloudstack-management
+            cloudstack-agent
+            ;
           default = cloudstack.cloudstack-management;
         }
       );
@@ -32,13 +38,21 @@
       # package from this flake's expressions with the system's nixpkgs.
       nixosModules = {
         cloudstack-management = ./nixos/modules/cloudstack-management.nix;
-        default = self.nixosModules.cloudstack-management;
+        cloudstack-agent = ./nixos/modules/cloudstack-agent.nix;
+        # Both services, each behind its enable option.
+        default = {
+          imports = [
+            self.nixosModules.cloudstack-management
+            self.nixosModules.cloudstack-agent
+          ];
+        };
       };
 
       checks = forAllSystems (pkgs: {
-        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) cloudstack-management;
+        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) cloudstack-management cloudstack-agent;
         nixos-management = pkgs.testers.runNixOSTest (import ./tests/management.nix { inherit self; });
         nixos-simulator = pkgs.testers.runNixOSTest (import ./tests/simulator.nix { inherit self; });
+        nixos-kvm = pkgs.testers.runNixOSTest (import ./tests/kvm.nix { inherit self; });
       });
 
       # For working on the upstream source tree.

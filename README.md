@@ -1,24 +1,30 @@
 # cloudstack-nix
 
-The [Apache CloudStack](https://cloudstack.apache.org/) management server,
-built from source with Nix and run as a NixOS service.
+The [Apache CloudStack](https://cloudstack.apache.org/) management server and
+KVM agent, built from source with Nix and run as NixOS services.
 
 Currently packages **CloudStack 4.23.0.0**. NixOS VM tests cover the management
-server, its database setup and the web UI, and deploy a zone with a VM on the
-simulator hypervisor. Real hypervisor hosts (KVM agent), the usage server and
-real secondary storage are not covered yet, see [Roadmap](#roadmap).
+server, its database setup and the web UI, deploy a zone with a VM on the
+simulator hypervisor, and add a KVM host to a zone. System VMs and guest VMs on
+KVM, the usage server and real secondary storage are not covered yet, see
+[Roadmap](#roadmap).
 
 ## Outputs
 
 | Output | Description |
 | --- | --- |
-| `packages.x86_64-linux.cloudstack-management` | Management server: launcher, jars, web UI, scripts, base SQL schema |
+| `packages.x86_64-linux.cloudstack-management` | Management server: launcher, jars, web UI, base SQL schema |
+| `packages.x86_64-linux.cloudstack-agent` | KVM agent: launcher, jars, libvirt hook, host setup script |
+| `packages.x86_64-linux.cloudstack-common` | Scripts and system VM patch files shared by both |
 | `packages.x86_64-linux.cloudstack-ui` | Web UI (Vue), built with `buildNpmPackage` |
 | `packages.x86_64-linux.cloudstack-build` | Maven reactor build: staging tree of the build artifacts |
 | `nixosModules.cloudstack-management` | `services.cloudstack.management` |
-| `overlays.default` | Adds `cloudstackPackages` (a scope) and `cloudstack-management` |
+| `nixosModules.cloudstack-agent` | `services.cloudstack.agent`, see [KVM hosts](#kvm-hosts) |
+| `nixosModules.default` | Both modules |
+| `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management` and `cloudstack-agent` |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor |
+| `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a KVM host added to a zone (needs nested virtualisation) |
 
 ## Usage
 
@@ -104,6 +110,89 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 | `/var/log/cloudstack/management` | `management-server.log`, `apilog.log`, `access.log` |
 | `/run/cloudstack-management/conf` | Generated configuration, secrets included |
 
+## KVM hosts
+
+```nix
+{
+  imports = [ cloudstack-nix.nixosModules.default ];
+
+  services.cloudstack.agent = {
+    enable = true;
+    # VNC ports of the VMs, for the console proxy.
+    openFirewall = true;
+  };
+
+  # The bridge that the zone's traffic labels name (cloudbr0 by default),
+  # with the host's address.
+  networking.bridges.cloudbr0.interfaces = [ "eno1" ];
+  networking.interfaces.cloudbr0.ipv4.addresses = [
+    { address = "192.0.2.21"; prefixLength = 24; }
+  ];
+
+  # The management server sets the host up over SSH.
+  services.openssh.enable = true;
+  users.users.root.openssh.authorizedKeys.keys = [
+    # /var/lib/cloudstack/management/.ssh/id_rsa.pub on the management server
+    "ssh-rsa AAAA..."
+  ];
+}
+```
+
+Then add the host to a KVM cluster, from the UI or with `addHost`: URL
+`http://<host address>`, user `root` (or a user with passwordless sudo) and its
+password. The management server tries its own key first, so with the key above
+any password will do. Before that, set the global setting `host` to the address
+that agents should connect to: it defaults to the address of the management
+server's default route, which may be on the wrong network.
+
+When the host is added, the management server logs in over SSH and
+
+1. has the host generate a key pair and a certificate request (`keystore-setup`),
+   signs it with its CA and installs the certificate (`keystore-cert-import`),
+   all in `/etc/cloudstack/agent`;
+2. runs `cloudstack-setup-agent`, which records the zone, pod, cluster, guid,
+   management servers and network devices in `agent.properties` and starts the
+   agent. Upstream's version also rewrites the host's network, libvirt,
+   firewall and AppArmor/SELinux configuration; here that is the NixOS
+   configuration's job.
+
+The agent then connects to the management server on port 8250.
+
+### What the module sets up
+
+- libvirtd, running QEMU as root, with upstream's `qemu.conf` settings
+  (`security_driver = "none"`, `vnc_listen = "0.0.0.0"`) and CloudStack's qemu
+  hook, which rewrites bridge names in incoming migrations and runs the scripts
+  in `/etc/libvirt/hooks/custom`.
+- `cloudstack-agent.service`, skipped until `agent.properties` has a guid, that
+  is until the host is added (or `settings.agent.guid` is set), rather than
+  restarted every few seconds. The agent keeps state in `agent.properties`, so
+  the file is kept: it starts as upstream's default, and at each start the
+  entries of `settings.agent` replace the ones with the same keys.
+  `uefi.properties` points at the UEFI firmware of libvirtd's QEMU.
+- What the management server's SSH setup expects: `/usr/share/cloudstack-common`
+  (with the keystore scripts wrapped so that they find `keytool` and the other
+  tools they need), a writable `/etc/cloudstack/agent`, `cloudstack-setup-agent`
+  in `PATH`, sudo, and the SHA-2 MACs (`hmac-sha2-512`, `hmac-sha2-256`) in
+  sshd's defaults: its SSH client has no encrypt-then-MAC algorithms, the only
+  ones NixOS allows by default. `/etc/libvirt/libvirtd.conf` is only a marker:
+  the keystore scripts check that it exists, and otherwise wait forever for a
+  system VM.
+- `br_netfilter` for security groups, NFS client support, and
+  `/var/lib/libvirt/images` for host-local primary storage.
+
+Not set up yet: live migration (libvirtd does not listen on the network) and
+UEFI guests (the agent detects UEFI support by asking `dpkg` or `rpm` whether
+an `ovmf` package is installed, so it reports none).
+
+### Paths
+
+| Path | Content |
+| --- | --- |
+| `/var/lib/cloudstack/agent` | `agent.properties`, the agent's keystore and certificates; `/etc/cloudstack/agent` links here |
+| `/var/log/cloudstack/agent` | `agent.log` |
+| `/usr/share/cloudstack-common` | Scripts and system VM patch files, at the path the management server uses |
+
 ## Differences from the upstream packages
 
 - There is no `/etc/cloudstack/management`. Tools that edit it
@@ -122,6 +211,9 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
   than store paths, because some scripts are copied to XenServer/OVM3 hosts.
 - `scripts/vm/systemvm/id_rsa.cloud`, a publicly known placeholder key
   upstream, links to the key the management server generates.
+- `cloudstack-setup-agent` is a NixOS replacement, see [KVM hosts](#kvm-hosts).
+  `cloudstack-agent-upgrade`, which renames bridges after an upgrade from
+  CloudStack 4.0, is not shipped.
 - The UI uses a regenerated `package-lock.json`: upstream's is out of sync with
   `package.json` (axios), so it cannot be installed offline.
 
@@ -130,7 +222,8 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 The Java build is heavy: `buildMavenPackage` compiles the whole reactor twice,
 once to fetch dependencies (fixed-output) and once offline. Each pass takes
 about 25 minutes on one core. Packaging lives in separate, cheap derivations
-(`management.nix`, `ui.nix`), so layout changes do not rebuild Java.
+(`common.nix`, `management.nix`, `agent.nix`, `ui.nix`), so layout changes do
+not rebuild Java.
 
 To bump CloudStack:
 
@@ -148,10 +241,17 @@ the code they patch.
 
 ## Roadmap
 
-- KVM agent module (`services.cloudstack.agent`). This is the hard part: libvirt
-  hooks, host networking, and an `agent.properties` that the agent rewrites.
+- System VMs and a guest VM on KVM: extend `tests/kvm.nix` with NFS primary and
+  secondary storage and the KVM system VM template (a download of several
+  hundred MB, so probably a separate check). The simulator test covers the
+  orchestration, but no real storage or system VM.
+- KVM live migration: libvirtd listening with TLS, using the certificates the
+  management server installs in `/etc/cloudstack/agent`.
+- With the next Maven rebuild, Java changes for the agent:
+  - detect UEFI support from the firmware files rather than from `dpkg`/`rpm`;
+  - resolve `/bin/systemctl` (rolling maintenance), `/usr/sbin/lvs` and
+    `/usr/sbin/lvchange` (CLVM) and `/bin/test` (multipath) from `PATH`;
+  - require the agent artifacts in `build.nix`, which only keeps them if
+    present.
 - Usage server. Its artifacts are already in `cloudstack-build`.
-- A VM test that deploys a zone with nested KVM and NFS secondary storage. The
-  simulator test covers the orchestration, but no real host, storage or system
-  VM.
 - CI with a binary cache, so nobody rebuilds the Maven reactor locally.
