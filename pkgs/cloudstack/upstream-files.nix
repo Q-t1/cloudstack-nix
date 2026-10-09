@@ -40,9 +40,9 @@
       sha256 = "8b0f328a96764302eed34b9a63ca65676ce28c27d10fea71c332d99b28d5826a";
       review = ''
         What upstream's host setup configures, which NixOS does instead:
-        nixos/modules/cloudstack-agent.nix (libvirtd and qemu.conf, TLS,
-        kernel modules), cloudstack-setup-agent.sh, and the README's KVM host
-        section (bridges, firewall).
+        nixos/modules/cloudstack-agent.nix (libvirtd and qemu.conf, TLS for
+        libvirtd and VNC, kernel modules), cloudstack-setup-agent.sh, and the
+        README's KVM host section (bridges, firewall).
       '';
     };
     "scripts/util/keystore-setup" = {
@@ -53,8 +53,8 @@
       sha256 = "7cec050d6260cc6a8c41481789a1ad17110ebea6e7386edeabb942effe4b13f7";
       review = ''
         nixos/modules/cloudstack-agent.nix: the tools in its wrapper's PATH,
-        the /var/lib/pki links (it links /etc/pki), the libvirtd.conf marker,
-        and `cloudstack-setup-agent -s`.
+        the /var/lib/pki links for libvirtd and VNC (it links /etc/pki), the
+        libvirtd.conf marker, and `cloudstack-setup-agent -s`.
       '';
     };
     "packaging/systemd/cloudstack-management.service" = {

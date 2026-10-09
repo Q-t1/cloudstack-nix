@@ -10,7 +10,8 @@
 # AppArmor/SELinux configuration of the host. On NixOS those come from the
 # system configuration, so this one only records where the host belongs in
 # agent.properties, like upstream's last step, then restarts the agent. With
-# -s alone, as keystore-cert-import runs it, it has libvirtd listen with TLS.
+# -s alone, as keystore-cert-import runs it, it has libvirtd listen with TLS
+# and QEMU serve VNC over TLS.
 #
 # Environment:
 #   CLOUDSTACK_CONF_DIR  directory holding agent.properties, as for
@@ -65,10 +66,11 @@ done
 if [ "$auto" -eq 0 ]; then
   if [ "$secure" -eq 1 ]; then
     # keystore-cert-import runs this once it has installed the host's
-    # certificate, and upstream configures libvirtd for TLS here. The NixOS
-    # module does, with a TLS socket that waits for the certificate: start it,
-    # and restart libvirtd to pass it the socket and load the certificate.
-    # Running VMs are left alone.
+    # certificate, and upstream configures libvirtd and VNC for TLS here. The
+    # NixOS module does, with a TLS socket and VNC settings that wait for the
+    # certificate: start the socket, and restart libvirtd to pass it the
+    # socket, load the certificate and rewrite qemu.conf with the VNC
+    # settings. Running VMs are left alone.
     systemctl start libvirtd-tls.socket
     systemctl restart libvirtd.service
     echo "Libvirtd with TLS started"
