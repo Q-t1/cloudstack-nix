@@ -1,5 +1,5 @@
 {
-  description = "Apache CloudStack management server for NixOS";
+  description = "Apache CloudStack management server and KVM agent for NixOS";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -14,7 +14,7 @@
     {
       overlays.default = final: _prev: {
         cloudstackPackages = final.callPackage ./pkgs/cloudstack { };
-        inherit (final.cloudstackPackages) cloudstack-management;
+        inherit (final.cloudstackPackages) cloudstack-management cloudstack-agent;
       };
 
       packages = forAllSystems (
@@ -23,7 +23,13 @@
           cloudstack = pkgs.callPackage ./pkgs/cloudstack { };
         in
         {
-          inherit (cloudstack) cloudstack-build cloudstack-ui cloudstack-management;
+          inherit (cloudstack)
+            cloudstack-build
+            cloudstack-common
+            cloudstack-ui
+            cloudstack-management
+            cloudstack-agent
+            ;
           default = cloudstack.cloudstack-management;
         }
       );
@@ -36,7 +42,7 @@
       };
 
       checks = forAllSystems (pkgs: {
-        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) cloudstack-management;
+        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) cloudstack-management cloudstack-agent;
         nixos-management = pkgs.testers.runNixOSTest (import ./tests/management.nix { inherit self; });
         nixos-simulator = pkgs.testers.runNixOSTest (import ./tests/simulator.nix { inherit self; });
       });

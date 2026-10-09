@@ -1,22 +1,25 @@
 # cloudstack-nix
 
 The [Apache CloudStack](https://cloudstack.apache.org/) management server,
-built from source with Nix and run as a NixOS service.
+built from source with Nix and run as a NixOS service, and the KVM agent.
 
 Currently packages **CloudStack 4.23.0.0**. NixOS VM tests cover the management
 server, its database setup and the web UI, and deploy a zone with a VM on the
-simulator hypervisor. Real hypervisor hosts (KVM agent), the usage server and
-real secondary storage are not covered yet, see [Roadmap](#roadmap).
+simulator hypervisor. The KVM agent is packaged but has no NixOS module yet;
+real hypervisor hosts, the usage server and real secondary storage are not
+covered yet, see [Roadmap](#roadmap).
 
 ## Outputs
 
 | Output | Description |
 | --- | --- |
-| `packages.x86_64-linux.cloudstack-management` | Management server: launcher, jars, web UI, scripts, base SQL schema |
+| `packages.x86_64-linux.cloudstack-management` | Management server: launcher, jars, web UI, base SQL schema |
+| `packages.x86_64-linux.cloudstack-agent` | KVM agent: launcher, jars, libvirt hook, host setup script, see [KVM agent](#kvm-agent) |
+| `packages.x86_64-linux.cloudstack-common` | Scripts and system VM patch files shared by both |
 | `packages.x86_64-linux.cloudstack-ui` | Web UI (Vue), built with `buildNpmPackage` |
 | `packages.x86_64-linux.cloudstack-build` | Maven reactor build: staging tree of the build artifacts |
 | `nixosModules.cloudstack-management` | `services.cloudstack.management` |
-| `overlays.default` | Adds `cloudstackPackages` (a scope) and `cloudstack-management` |
+| `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management` and `cloudstack-agent` |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor |
 
@@ -104,6 +107,26 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 | `/var/log/cloudstack/management` | `management-server.log`, `apilog.log`, `access.log` |
 | `/run/cloudstack-management/conf` | Generated configuration, secrets included |
 
+## KVM agent
+
+`cloudstack-agent` is packaged, but there is no NixOS module to run it yet.
+
+- `bin/cloudstack-agent` starts the agent. Its configuration directory
+  (`CLOUDSTACK_CONF_DIR`, default `/etc/cloudstack/agent`) holds
+  `agent.properties`, `environment.properties`, `log4j-cloud.xml` and
+  `uefi.properties`, with upstream's defaults in `share/cloudstack-agent/conf`.
+  It must be writable: the agent records its state in `agent.properties` and
+  keeps its keystore next to it.
+- `bin/cloudstack-setup-agent` replaces upstream's script, which the management
+  server runs over SSH when it adds a host. Upstream's version also rewrites
+  the host's network, libvirt, firewall and AppArmor/SELinux configuration.
+  This one only writes the management servers, zone, pod, cluster, guid and
+  network devices into `agent.properties` and restarts
+  `cloudstack-agent.service`; the rest is the NixOS configuration's job.
+- `share/cloudstack-agent/lib/libvirtqemuhook` is the libvirt qemu hook.
+  `cloudstack-ssh` (into a system VM) and `cloudstack-guest-tool` (QEMU guest
+  agent queries) are upstream's helpers.
+
 ## Differences from the upstream packages
 
 - There is no `/etc/cloudstack/management`. Tools that edit it
@@ -122,6 +145,9 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
   than store paths, because some scripts are copied to XenServer/OVM3 hosts.
 - `scripts/vm/systemvm/id_rsa.cloud`, a publicly known placeholder key
   upstream, links to the key the management server generates.
+- `cloudstack-setup-agent` is a NixOS replacement, see [KVM agent](#kvm-agent).
+  `cloudstack-agent-upgrade`, which renames bridges after an upgrade from
+  CloudStack 4.0, is not shipped.
 - The UI uses a regenerated `package-lock.json`: upstream's is out of sync with
   `package.json` (axios), so it cannot be installed offline.
 
@@ -130,7 +156,8 @@ the "CentOS 5.6 (64-bit) no GUI (Simulator)" template.
 The Java build is heavy: `buildMavenPackage` compiles the whole reactor twice,
 once to fetch dependencies (fixed-output) and once offline. Each pass takes
 about 25 minutes on one core. Packaging lives in separate, cheap derivations
-(`management.nix`, `ui.nix`), so layout changes do not rebuild Java.
+(`common.nix`, `management.nix`, `agent.nix`, `ui.nix`), so layout changes do
+not rebuild Java.
 
 To bump CloudStack:
 
@@ -148,8 +175,15 @@ the code they patch.
 
 ## Roadmap
 
-- KVM agent module (`services.cloudstack.agent`). This is the hard part: libvirt
-  hooks, host networking, and an `agent.properties` that the agent rewrites.
+- KVM agent module (`services.cloudstack.agent`): libvirtd and the qemu hook,
+  host bridges, declared settings merged into the `agent.properties` that the
+  agent rewrites, and what the management server's host setup over SSH
+  expects: `/usr/share/cloudstack-common/scripts/util/keystore-setup`, a
+  writable `/etc/cloudstack/agent` and `cloudstack-setup-agent` in `PATH`. Then
+  a VM test with two nodes that adds a KVM host and waits for it to be `Up`.
+- With the next Maven rebuild: require the agent artifacts in `build.nix`
+  (it only keeps them if present), and resolve `/bin/systemctl`, used by the
+  agent's rolling maintenance, from `PATH`.
 - Usage server. Its artifacts are already in `cloudstack-build`.
 - A VM test that deploys a zone with nested KVM and NFS secondary storage. The
   simulator test covers the orchestration, but no real host, storage or system
