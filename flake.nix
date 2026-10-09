@@ -38,13 +38,21 @@
       # package from this flake's expressions with the system's nixpkgs.
       nixosModules = {
         cloudstack-management = ./nixos/modules/cloudstack-management.nix;
-        default = self.nixosModules.cloudstack-management;
+        cloudstack-agent = ./nixos/modules/cloudstack-agent.nix;
+        # Both services, each behind its enable option.
+        default = {
+          imports = [
+            self.nixosModules.cloudstack-management
+            self.nixosModules.cloudstack-agent
+          ];
+        };
       };
 
       checks = forAllSystems (pkgs: {
         inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) cloudstack-management cloudstack-agent;
         nixos-management = pkgs.testers.runNixOSTest (import ./tests/management.nix { inherit self; });
         nixos-simulator = pkgs.testers.runNixOSTest (import ./tests/simulator.nix { inherit self; });
+        nixos-kvm = pkgs.testers.runNixOSTest (import ./tests/kvm.nix { inherit self; });
       });
 
       # For working on the upstream source tree.
