@@ -64,6 +64,34 @@ maven.buildMavenPackage {
     substituteInPlace plugins/outofbandmanagement-drivers/ipmitool/src/main/java/org/apache/cloudstack/outofbandmanagement/driver/ipmitool/IpmitoolOutOfBandManagementDriver.java \
       --replace-fail '"/usr/bin/ipmitool"' '"ipmitool"'
 
+    # The KVM agent's other tools, also from PATH: systemctl (rolling
+    # maintenance), lvs and lvchange (CLVM), test (multipath).
+    kvm=plugins/hypervisors/kvm/src/main/java/com/cloud/hypervisor/kvm
+    substituteInPlace $kvm/resource/rolling/maintenance/RollingMaintenanceServiceExecutor.java \
+      --replace-fail '"/bin/systemctl"' '"systemctl"'
+    substituteInPlace $kvm/storage/ClvmStorageAdaptor.java \
+      --replace-fail '"/usr/sbin/lvs"' '"lvs"'
+    substituteInPlace $kvm/resource/wrapper/LibvirtClvmLockTransferCommandWrapper.java \
+      --replace-fail '"/usr/sbin/lvs"' '"lvs"' \
+      --replace-fail '"/usr/sbin/lvchange"' '"lvchange"'
+    substituteInPlace $kvm/storage/MultipathSCSIAdapterBase.java \
+      --replace-fail '"/bin/test"' '"test"'
+
+    # The agent reports UEFI support when an ovmf package is installed, as
+    # dpkg or rpm tell. Report it when the UEFI firmware of uefi.properties
+    # exists instead, which is what UEFI guests need.
+    substituteInPlace $kvm/resource/LibvirtComputingResource.java \
+      --replace-fail '    public boolean isUefiPropertiesFileLoaded() {' \
+                     '    public boolean isUefiFirmwarePresent() {
+            String loader = uefiProperties.getProperty(GuestDef.GUEST_LOADER_LEGACY);
+            return loader != null && new File(loader).isFile();
+        }
+
+        public boolean isUefiPropertiesFileLoaded() {'
+    substituteInPlace $kvm/resource/wrapper/LibvirtReadyCommandWrapper.java \
+      --replace-fail 'hostSupportsUefi(libvirtComputingResource.isUbuntuOrDebianHost()) && libvirtComputingResource.isUefiPropertiesFileLoaded()' \
+                     'libvirtComputingResource.isUefiFirmwarePresent()'
+
     # Install paths baked into the code become system properties (defaulting
     # to the upstream value), so this derivation does not depend on where the
     # files end up. The launcher in management.nix sets them.
@@ -76,6 +104,11 @@ maven.buildMavenPackage {
     substituteInPlace plugins/hypervisors/external/src/main/java/org/apache/cloudstack/hypervisor/external/provisioner/ExternalPathPayloadProvisioner.java \
       --replace-fail '"/usr/share/cloudstack-management/extensions"' \
                      'System.getProperty("cloudstack.extensions.path", "/usr/share/cloudstack-management/extensions")'
+    # The same for the state file of the usage sanity check, which the
+    # launcher in usage.nix sets.
+    substituteInPlace usage/src/main/java/com/cloud/usage/UsageSanityChecker.java \
+      --replace-fail '"/usr/local/libexec/sanity-check-last-id"' \
+                     'System.getProperty("cloudstack.usage.sanity.check.file", "/usr/local/libexec/sanity-check-last-id")'
   '';
 
   installPhase = ''
@@ -89,18 +122,6 @@ maven.buildMavenPackage {
         cp -a --parents "$path" "$out/"
       done
     }
-    # Optional extras for future agent/usage packages: tolerate their absence
-    # rather than failing at the end of a multi-hour build.
-    keepIfPresent() {
-      for path in "$@"; do
-        if [ -e "$path" ]; then
-          cp -a --parents "$path" "$out/"
-        else
-          echo "warning: $path was not built, skipping" >&2
-        fi
-      done
-    }
-
     keep \
       client/target/cloud-client-ui-${version}.jar \
       client/target/lib \
@@ -112,9 +133,7 @@ maven.buildMavenPackage {
       utils/target/cloud-utils-${version}-bundled.jar \
       plugins/hypervisors/simulator/target/cloud-plugin-hypervisor-simulator-${version}.jar \
       engine/schema/dist/systemvm-templates \
-      systemvm/dist
-
-    keepIfPresent \
+      systemvm/dist \
       usage/target/cloud-usage-${version}.jar \
       usage/target/dependencies \
       usage/target/transformed \

@@ -96,7 +96,10 @@
         # It waited for the database rather than fail and restart.
         machine.succeed("systemctl show -P NRestarts cloudstack-usage | grep -qx 0")
         machine.succeed("test -s /var/log/cloudstack/usage/usage.log")
-        machine.succeed("grep -qx 1 /usr/local/libexec/sanity-check-last-id")
+        # The sanity check's state, seeded as upstream's package does, but in
+        # the usage server's state directory.
+        machine.succeed("grep -qx 1 /var/lib/cloudstack/usage/sanity-check-last-id")
+        machine.fail("test -e /usr/local/libexec")
         # Jobs every 2 minutes, up to the current time, rather than daily for
         # the day before: the usage server reads this when it starts.
         cmk("update", "configuration", name="usage.stats.job.aggregation.range", value="2")

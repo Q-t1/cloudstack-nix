@@ -23,7 +23,7 @@ let
   confDir = "/run/cloudstack-management/conf";
   credentialsDir = "/run/credentials/cloudstack-management.service";
   usageConfDir = "/run/cloudstack-usage/conf";
-  usageSanityCheckFile = "/usr/local/libexec/sanity-check-last-id";
+  usageStateDir = "${stateDir}/usage";
 
   share = "${cfg.package}/share";
   inherit (cfg.package) jre;
@@ -797,13 +797,6 @@ in
       '';
     };
 
-    # The usage sanity check (global setting usage.sanity.check.interval, off
-    # by default) keeps its state at this fixed path.
-    systemd.tmpfiles.rules = lib.mkIf cfg.usage.enable [
-      "d /usr/local/libexec 0755 root root - -"
-      "f ${usageSanityCheckFile} 0644 cloud cloud - 1"
-    ];
-
     # Upstream's package links the usage server's db.properties and key to
     # the management server's; this one writes the same files.
     systemd.services.cloudstack-usage = lib.mkIf cfg.usage.enable {
@@ -839,6 +832,13 @@ in
         chmod -R u+w ${usageConfDir}
         ${writeDbProperties usageConfDir}
         cp "$CREDENTIALS_DIRECTORY/secret-key" ${usageConfDir}/key
+
+        # The state of the usage sanity check (global setting
+        # usage.sanity.check.interval, off by default), at the path that the
+        # launcher sets. Upstream's package seeds it so.
+        if [ ! -e ${usageStateDir}/sanity-check-last-id ]; then
+          echo 1 > ${usageStateDir}/sanity-check-last-id
+        fi
       '';
 
       # The usage server needs the schema of its own version and its job
@@ -879,13 +879,14 @@ in
         LogsDirectoryMode = "0750";
         RuntimeDirectory = "cloudstack-usage";
         RuntimeDirectoryMode = "0700";
+        StateDirectory = "cloudstack/usage";
+        StateDirectoryMode = "0700";
         UMask = "0027";
         Restart = "always";
         RestartSec = "10s";
         # The JVM exits with 143 on SIGTERM.
         SuccessExitStatus = 143;
 
-        ReadWritePaths = [ "-${usageSanityCheckFile}" ];
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";
