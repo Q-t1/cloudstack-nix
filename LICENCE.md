@@ -1,22 +1,3 @@
-Skip to main text
-Free Software Supporter: 
-email address
- 	JOIN THE FSF
- [A GNU head] GNU Operating System
-Supported by the Free Software Foundation
- [Search www.gnu.org]   [Other languages] 
-ABOUT GNU PHILOSOPHY LICENSES EDUCATION SOFTWARE DISTROS DOCS MALWARE HELP GNU AUDIO & VIDEO GNU ART FUN GNU'S WHO? SOFTWARE DIRECTORY HARDWARE SITEMAP
-GNU Affero General Public License
- [AGPLv3 Logo] 
-Skip to license text
-
-Why the Affero GPL
-Frequently Asked Questions
-How to use GNU licenses for your own software
-Translations of the GNU AGPL
-The GNU AGPL in other formats: plain text, Docbook, LaTeX, standalone HTML, Texinfo, Markdown, ODF, RTF
-GNU AGPL logos to use with your project
-What to do if you see a possible GNU AGPL violation
 GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007
 
@@ -225,19 +206,3 @@ Also add information on how to contact you by electronic and paper mail.
 If your software can interact with users remotely through a computer network, you should also make sure that it provides a way for users to get its source. For example, if your program is a web application, its interface could display a "Source" link that leads users to an archive of the code. There are many ways you could offer source, and different solutions will be better for different programs; see section 13 for the specific requirements.
 
 You should also get your employer (if you work as a programmer) or school, if any, to sign a "copyright disclaimer" for the program, if necessary. For more information on this, and how to apply and follow the GNU AGPL, see <https://www.gnu.org/licenses/>.
-
-▲
- [FSF logo] “The Free Software Foundation (FSF) is a nonprofit with a worldwide mission to promote computer user freedom. We defend the rights of all software users.”
-
-JOIN DONATE SHOP
-Please send general FSF & GNU inquiries to <gnu@gnu.org>. There are also other ways to contact the FSF. Broken links and other corrections or suggestions can be sent to <webmasters@gnu.org>.
-
-Please see the Translations README for information on coordinating and contributing translations of this article.
-
-Copyright notice above.
-
-Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
-
-Copyright Infringement Notification
-
-Updated: $Date: 2023/11/30 09:46:01 $
