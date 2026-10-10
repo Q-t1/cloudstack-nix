@@ -1,15 +1,59 @@
 # cloudstack-nix
 
-The [Apache CloudStack](https://cloudstack.apache.org/) management server and
-KVM agent, built from source with Nix and run as NixOS services.
+[Apache CloudStack](https://cloudstack.apache.org/) on NixOS: the management
+server, the KVM agent and the usage server, built from source with Nix, set up
+by NixOS modules, and tested end to end in NixOS VMs.
 
-Currently packages **CloudStack 4.23.0.0**, with the usage server. NixOS VM tests
-cover the management server, its database setup and the web UI; deploy a zone
-with a VM on the simulator hypervisor, which the usage server bills; and deploy a
-zone on a KVM host with NFS storage, up to a guest VM in an isolated network,
-reached through its virtual router, its console opened through the console
-proxy over TLS, and live-migrated to a second host, then a UEFI VM. See
-[Roadmap](#roadmap) for what is not covered yet.
+Currently packages **CloudStack 4.23.0.0**.
+
+## Try it
+
+```sh
+nix run github:Q-t1/cloudstack-nix#demo
+```
+
+boots a VM running the management server with the simulator hypervisor, which
+simulates hosts, storage and system VMs, and deploys a zone on it, with a
+network and a VM. The VM's console is in the terminal: follow the deployment
+with `journalctl -fu cloudstack-demo`, then open <http://localhost:8080/client>
+and log in as `admin` / `password`. The first boot takes a few minutes, while
+the management server sets up its database.
+
+The VM keeps its state in `./cloudstack-demo.qcow2`; `poweroff` stops it, and
+deleting that file starts over. It needs KVM, 4 GB of memory and port 8080,
+which it only forwards from the loopback address. Until there is a binary
+cache (see [Roadmap](#roadmap)), the first run builds CloudStack from source:
+about 20 minutes on 12 cores.
+
+## Start a cloud
+
+```sh
+nix flake init -t github:Q-t1/cloudstack-nix
+```
+
+creates a flake with two machines to adapt: a management server, with its
+database and the usage server, and a KVM host. See [Usage](#usage) and
+[KVM hosts](#kvm-hosts) for what the modules set up.
+
+## What it does
+
+- **Builds CloudStack from source**: the Maven reactor, the Vue web UI and
+  the system VM scripts, in cheap packaging derivations on top of one heavy
+  Java build. It follows upstream's packaging rather than copying it: the
+  launchers run what upstream's systemd units run, and a cheap check names
+  the upstream files that a CloudStack bump changed. See
+  [Following upstream](#following-upstream).
+- **Sets up the services declaratively**: the modules do what
+  `cloudstack-setup-databases` and `cloudstack-setup-agent` do, from options,
+  with upstream's configuration files and secrets as systemd credentials.
+- **Prepares KVM hosts the way the management server expects them**:
+  certificates from its CA, libvirt over TLS for live migration, VNC over TLS
+  for the console proxy, UEFI guests.
+- **Tests it all in NixOS VMs**: the first start and the web UI; a zone on the
+  simulator, billed by the usage server; a zone on two nested KVM hosts with
+  NFS storage, up to a guest VM reached through its virtual router, its
+  console over TLS, live migration and a UEFI VM. See [Roadmap](#roadmap) for
+  what is not covered yet.
 
 ## Outputs
 
@@ -22,13 +66,19 @@ proxy over TLS, and live-migrated to a second host, then a UEFI VM. See
 | `packages.x86_64-linux.cloudstack-ui` | Web UI (Vue), built with `buildNpmPackage` |
 | `packages.x86_64-linux.cloudstack-build` | Maven reactor build: staging tree of the build artifacts |
 | `packages.x86_64-linux.cloudstack-systemvm-template-kvm` | The KVM system VM template (518 MB download), for `systemVmTemplates` |
+| `legacyPackages.x86_64-linux.cloudstackPackages` | The package scope that the packages come from, see [Package set](#package-set) |
 | `nixosModules.cloudstack-management` | `services.cloudstack.management` |
 | `nixosModules.cloudstack-agent` | `services.cloudstack.agent`, see [KVM hosts](#kvm-hosts) |
 | `nixosModules.default` | Both modules |
 | `overlays.default` | Adds `cloudstackPackages` (a scope), `cloudstack-management`, `cloudstack-agent` and `cloudstack-usage` |
+| `apps.x86_64-linux.demo` | A VM with a zone on the simulator, see [Try it](#try-it) |
+| `templates.default` | A management server and a KVM host, see [Start a cloud](#start-a-cloud) |
 | `checks.x86_64-linux.upstream-files` | Fails when a CloudStack bump changes upstream files that the flake follows by hand, see [Following upstream](#following-upstream) |
+| `checks.x86_64-linux.template` | Evaluates the template's machines, without building them: catches option changes and failed assertions in seconds |
+| `checks.x86_64-linux.formatting` | Fails on Nix files that `nix fmt` would change |
 | `checks.x86_64-linux.nixos-management` | NixOS VM test: first start, API, web UI, restart |
 | `checks.x86_64-linux.nixos-simulator` | NixOS VM test: an advanced zone and a VM on the simulator hypervisor, and the usage server's records for the VM |
+| `checks.x86_64-linux.nixos-demo` | NixOS VM test: the demo's zone, network and VM |
 | `checks.x86_64-linux.nixos-kvm` | NixOS VM test: a zone on KVM hosts with NFS storage, its system VMs and a guest VM, reached through its virtual router and its console over TLS, and live-migrated, then a UEFI VM (needs nested virtualisation) |
 
 ## Usage
@@ -39,10 +89,10 @@ proxy over TLS, and live-migrated to a second host, then a UEFI VM. See
 
   outputs = { nixpkgs, cloudstack-nix, ... }: {
     nixosConfigurations.cloudstack = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
       modules = [
         cloudstack-nix.nixosModules.default
         {
+          nixpkgs.hostPlatform = "x86_64-linux";
           services.cloudstack.management = {
             enable = true;
             # The address other management servers use to reach this one.
@@ -56,10 +106,37 @@ proxy over TLS, and live-migrated to a second host, then a UEFI VM. See
 }
 ```
 
-The module builds the package with your system's nixpkgs, so the overlay is
-optional. The web UI is at `http://<host>:8080/client`; log in as `admin` /
-`password` and change that password. The first start takes a few minutes: the
-server upgrades the base schema (CloudStack 4.0) to its own version.
+The web UI is at `http://<host>:8080/client`; log in as `admin` / `password`
+and change that password. The first start takes a few minutes: the server
+upgrades the base schema (CloudStack 4.0) to its own version.
+
+### Package set
+
+The modules default to this flake's packages, built with its own locked
+nixpkgs: the build that its checks test, whatever nixpkgs your system has.
+With `inputs.cloudstack-nix.inputs.nixpkgs.follows = "nixpkgs"`, they are
+built with yours instead, a combination the checks have not tested, whose
+Maven and npm dependency hashes may not match. With the overlay, the modules
+default to its packages, also built with your nixpkgs.
+
+The packages come from a scope, `cloudstackPackages`, so an override applies
+to all of them, e.g. to run on JDK 21, which upstream supports too (only the
+launchers change; the Maven build stays on JDK 17):
+
+```nix
+# cloudstack-nix is the flake input, passed through specialArgs.
+{ pkgs, cloudstack-nix, ... }:
+let
+  cloudstack = cloudstack-nix.legacyPackages.x86_64-linux.cloudstackPackages.overrideScope (
+    final: prev: { jre = pkgs.jdk21_headless; }
+  );
+in
+{
+  services.cloudstack.management.package = cloudstack.cloudstack-management;
+  services.cloudstack.management.usage.package = cloudstack.cloudstack-usage;
+  services.cloudstack.agent.package = cloudstack.cloudstack-agent;
+}
+```
 
 ### What the module sets up
 
@@ -122,8 +199,10 @@ check (`usage.sanity.check.interval`, off by default) keeps its state in
 
 ### Exploring a simulated zone
 
-To browse the zone that the simulator test deploys, run the test's interactive
-driver with the web UI forwarded to the host:
+The [demo](#try-it) is the quickest way to browse a simulated zone; its
+machine is `nixos/demo`, and `nixos/demo/deploy.sh` deploys the zone through
+the API. To browse the zone that the simulator test deploys instead, run the
+test's interactive driver with the web UI forwarded to the host:
 
 ```sh
 QEMU_NET_OPTS=hostfwd=tcp:127.0.0.1:8080-:8080 \

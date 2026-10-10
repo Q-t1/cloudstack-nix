@@ -1,6 +1,7 @@
 # Boots the management server against a local MariaDB, waits until it has
 # upgraded the base schema to its own version, then uses the API and web UI.
 { self }:
+{ config, ... }:
 {
   name = "cloudstack-management";
 
@@ -61,7 +62,8 @@
             f"curl -sf -b /tmp/cookies '{api}?command=listCapabilities&response=json&sessionkey={sessionkey}'"
         ))
         version = capabilities["listcapabilitiesresponse"]["capability"]["cloudstackversion"]
-        assert version.startswith("4.23"), f"unexpected version {version}"
+        expected = "${config.nodes.machine.services.cloudstack.management.package.version}"
+        assert version == expected, f"version {version}, expected {expected}"
 
     with subtest("web UI is served with the configured config.json"):
         # Not piped into grep -q: it exits early and curl then fails (23).
