@@ -1,5 +1,11 @@
 # cloudstack-nix
 
+> [!WARNING]
+> This project is not yet ready for production environments. Feedback is
+> welcome: try it, and open an
+> [issue](https://github.com/Q-t1/cloudstack-nix/issues) for anything that
+> breaks, is missing or could be better.
+
 [Apache CloudStack](https://cloudstack.apache.org/) on NixOS: the management
 server, the KVM agent and the usage server, built from source with Nix, set up
 by NixOS modules, and tested end to end in NixOS VMs.
